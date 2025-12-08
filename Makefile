@@ -1,12 +1,14 @@
 NAME    =   pbrain-gomoku-ai
 
-SRC     =   src/main.cpp
+SRC     =   src/main.cpp \
+            src/Protocol.cpp \
+            src/GomokuAI.cpp
 
 OBJ     =   $(SRC:.cpp=.o)
 
 CXX     =   g++
 
-CXXFLAGS = -Wall -Wextra -Wconversion -std=c++17
+CXXFLAGS = -Wall -Wextra -Werror -std=c++17 -I./src
 
 all:    $(NAME)
 

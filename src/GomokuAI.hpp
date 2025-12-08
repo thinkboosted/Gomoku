@@ -18,5 +18,9 @@ public:
 
     int width;
     int height;
-    std::vector<std::vector<int>> board; // 0 = empty, 1 = me, 2 = opponent
+    std::vector<std::vector<int>> board; 
+
+    // Heuristic Evaluation Methods
+    int evaluate_position(int x, int y, int me, int opponent);
+    int evaluate_line(int x, int y, int player);
 };

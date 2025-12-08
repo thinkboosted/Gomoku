@@ -1,140 +1,227 @@
+#include <array>
+#include <cstdint>
+#include <functional>
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 #include <sstream>
 #include <cstdlib>
 #include <ctime>
 
-// Simple structure to represent a point
+namespace {
+
+bool SHOULD_STOP = false;
+int BOARD_WIDTH = 20;
+int BOARD_HEIGHT = 20;
+std::vector<std::vector<int>> BOARD; // 0 = empty, 1 = me, 2 = opponent
+
+enum log_type : std::uint8_t {
+  UNKNOWN,
+  ERROR,
+  MESSAGE,
+  DEBUG,
+};
+
+const std::unordered_map<log_type, std::string_view> LOG_TYPE_MAPPINGS{
+    {UNKNOWN, "UNKNOWN"},
+    {ERROR, "ERROR"},
+    {MESSAGE, "MESSAGE"},
+    {DEBUG, "DEBUG"},
+};
+
+auto send_log(log_type type, const std::string_view &msg) -> void {
+  std::cout << LOG_TYPE_MAPPINGS.at(type) << " " << msg << std::endl;
+}
+
+// --- Game Logic Helpers ---
+
 struct Point {
     int x;
     int y;
 };
 
-class GomokuAI {
-public:
-    int width;
-    int height;
-    std::vector<std::vector<int>> board; // 0 = empty, 1 = me, 2 = opponent
+void init_board(int size) {
+    BOARD_WIDTH = size;
+    BOARD_HEIGHT = size;
+    BOARD.assign(BOARD_WIDTH, std::vector<int>(BOARD_HEIGHT, 0));
+}
 
-    GomokuAI() : width(20), height(20) {
-        srand(time(NULL));
+void update_board(int x, int y, int player) {
+    if (x >= 0 && x < BOARD_WIDTH && y >= 0 && y < BOARD_HEIGHT) {
+        BOARD[x][y] = player;
     }
+}
 
-    void init(int size) {
-        width = size;
-        height = size;
-        board.assign(width, std::vector<int>(height, 0));
-    }
-
-    // Function to parse coordinates "x,y"
-    Point parseCoordinates(const std::string& s) {
-        size_t commaPos = s.find(',');
-        if (commaPos == std::string::npos) return {-1, -1};
+Point parse_coordinates(const std::string& s) {
+    size_t commaPos = s.find(',');
+    if (commaPos == std::string::npos) return {-1, -1};
+    try {
         int x = std::stoi(s.substr(0, commaPos));
         int y = std::stoi(s.substr(commaPos + 1));
         return {x, y};
+    } catch (...) {
+        return {-1, -1};
     }
+}
 
-    // Simple random move logic (to be improved!)
-    Point findBestMove() {
-        // Try to find a random empty spot
-        int attempts = 0;
-        while (attempts < 1000) {
-            int x = rand() % width;
-            int y = rand() % height;
-            if (board[x][y] == 0) {
-                return {x, y};
-            }
-            attempts++;
+Point find_best_move() {
+    // Simple random logic for now
+    int attempts = 0;
+    while (attempts < 1000) {
+        int x = rand() % BOARD_WIDTH;
+        int y = rand() % BOARD_HEIGHT;
+        if (BOARD[x][y] == 0) {
+            return {x, y};
         }
-        // Fallback: search linearly
-        for (int x = 0; x < width; ++x) {
-            for (int y = 0; y < height; ++y) {
-                if (board[x][y] == 0) return {x, y};
-            }
-        }
-        return {-1, -1}; // Should not happen if board not full
+        attempts++;
     }
-
-    void updateBoard(int x, int y, int player) {
-        if (x >= 0 && x < width && y >= 0 && y < height) {
-            board[x][y] = player;
+    // Fallback: search linearly
+    for (int x = 0; x < BOARD_WIDTH; ++x) {
+        for (int y = 0; y < BOARD_HEIGHT; ++y) {
+            if (BOARD[x][y] == 0) return {x, y};
         }
     }
+    return {-1, -1};
+}
 
-    void run() {
-        std::string line;
-        while (std::getline(std::cin, line)) {
-            // Remove carriage return if present (Windows compatibility)
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty()) continue;
+// --- Command Handlers ---
 
-            std::stringstream ss(line);
-            std::string command;
-            ss >> command;
+auto handle_about([[maybe_unused]] std::string &cmd) -> void {
+  constexpr std::string_view bot_name = "pbrain-gomoku-ai";
+  std::cout << "name=\"" << bot_name << "\", version=\"1.0\", author=\"Mael\", country=\"FR\"" << std::endl;
+}
 
-            if (command == "START") {
-                int size;
-                ss >> size;
-                init(size);
-                std::cout << "OK" << std::endl;
-            }
-            else if (command == "BEGIN") {
-                // We start first
-                Point p = findBestMove();
-                updateBoard(p.x, p.y, 1); // 1 is us
-                std::cout << p.x << "," << p.y << std::endl;
-            }
-            else if (command == "TURN") {
-                std::string coords;
-                ss >> coords;
-                Point opp = parseCoordinates(coords);
-                updateBoard(opp.x, opp.y, 2); // 2 is opponent
+auto handle_start(std::string &cmd) -> void {
+  // Format: START [size]
+  std::stringstream ss(cmd);
+  std::string temp;
+  int size;
+  ss >> temp >> size;
+  if (ss.fail()) size = 20; // Default fallback
 
-                Point p = findBestMove();
-                updateBoard(p.x, p.y, 1); // 1 is us
-                std::cout << p.x << "," << p.y << std::endl;
-            }
-            else if (command == "BOARD") {
-                // Reconstruct board from scratch
-                board.assign(width, std::vector<int>(height, 0));
-                std::string entry;
-                while (std::getline(std::cin, entry)) {
-                    if (!entry.empty() && entry.back() == '\r') entry.pop_back();
-                    if (entry == "DONE") break;
+  init_board(size);
+  std::cout << "OK" << std::endl;
+}
 
-                    // Parse "x,y,player"
-                    size_t c1 = entry.find(',');
-                    size_t c2 = entry.find(',', c1 + 1);
-                    if (c1 != std::string::npos && c2 != std::string::npos) {
-                        int x = std::stoi(entry.substr(0, c1));
-                        int y = std::stoi(entry.substr(c1 + 1, c2 - c1 - 1));
-                        int player = std::stoi(entry.substr(c2 + 1));
-                        updateBoard(x, y, player); // 1 or 2
-                    }
-                }
-                // Play after board reconstruction
-                Point p = findBestMove();
-                updateBoard(p.x, p.y, 1);
-                std::cout << p.x << "," << p.y << std::endl;
-            }
-            else if (command == "ABOUT") {
-                std::cout << "name=\"MyGomokuAI\", version=\"1.0\", author=\"Mael\", country=\"FR\"" << std::endl;
-            }
-            else if (command == "END") {
-                break;
-            }
-            // INFO commands are ignored for now
+auto handle_end([[maybe_unused]] std::string &cmd) -> void {
+  SHOULD_STOP = true;
+}
+
+auto handle_info([[maybe_unused]] std::string &cmd) -> void {
+  // Handle info - ignored for now
+}
+
+auto handle_begin([[maybe_unused]] std::string &cmd) -> void {
+  Point p = find_best_move();
+  update_board(p.x, p.y, 1); // 1 is us
+  std::cout << p.x << "," << p.y << std::endl;
+}
+
+auto handle_turn(std::string &cmd) -> void {
+  // Format: TURN X,Y
+  // cmd looks like "TURN 10,10"
+  std::stringstream ss(cmd);
+  std::string temp, coords;
+  ss >> temp >> coords;
+
+  Point opp = parse_coordinates(coords);
+  if (opp.x != -1) {
+      update_board(opp.x, opp.y, 2); // 2 is opponent
+  }
+
+  Point p = find_best_move();
+  update_board(p.x, p.y, 1); // 1 is us
+  std::cout << p.x << "," << p.y << std::endl;
+}
+
+auto handle_board([[maybe_unused]] std::string &cmd) -> void {
+    // Reconstruct board from scratch
+    init_board(BOARD_WIDTH); // Clear board
+    std::string entry;
+    while (std::getline(std::cin, entry)) {
+        // Handle Windows CR
+        if (!entry.empty() && entry.back() == '\r') entry.pop_back();
+        if (entry == "DONE") break;
+
+        // Parse "x,y,player"
+        size_t c1 = entry.find(',');
+        size_t c2 = entry.find(',', c1 + 1);
+        if (c1 != std::string::npos && c2 != std::string::npos) {
+            try {
+                int x = std::stoi(entry.substr(0, c1));
+                int y = std::stoi(entry.substr(c1 + 1, c2 - c1 - 1));
+                int player = std::stoi(entry.substr(c2 + 1));
+                update_board(x, y, player);
+            } catch (...) {}
         }
     }
+    // Play after board reconstruction
+    Point p = find_best_move();
+    update_board(p.x, p.y, 1);
+    std::cout << p.x << "," << p.y << std::endl;
+}
+
+struct CommandMapping {
+  std::string cmd;
+  std::function<void(std::string &)> func;
 };
 
-int main() {
-    // Unbuffered I/O is safer for pipes
-    std::cout.setf(std::ios::unitbuf);
+const std::array<CommandMapping, 7> COMMAND_MAPPINGS{{
+    {
+        "ABOUT",
+        handle_about,
+    },
+    {
+        "START",
+        handle_start,
+    },
+    {
+        "END",
+        handle_end,
+    },
+    {
+        "INFO",
+        handle_info,
+    },
+    {
+        "BEGIN",
+        handle_begin,
+    },
+    {
+        "TURN",
+        handle_turn,
+    },
+    {
+        "BOARD",
+        handle_board,
+    },
+}};
 
-    GomokuAI ai;
-    ai.run();
+auto handle_command(std::string &cmd) -> void {
+    // Remove potential carriage return
+    if (!cmd.empty() && cmd.back() == '\r') cmd.pop_back();
+    if (cmd.empty()) return;
+
+    for (const auto &i : COMMAND_MAPPINGS) {
+        if (cmd.rfind(i.cmd, 0) == 0) {
+            i.func(cmd);
+            return;
+        }
+    }
+    send_log(UNKNOWN, "command is not implemented");
+}
+
+} // namespace
+
+int main() {
+    // Unbuffered output is crucial for protocol communication
+    std::cout.setf(std::ios::unitbuf);
+    srand(static_cast<unsigned>(time(NULL)));
+
+    for (std::string line; !SHOULD_STOP && std::getline(std::cin, line);) {
+        handle_command(line);
+    }
     return 0;
 }

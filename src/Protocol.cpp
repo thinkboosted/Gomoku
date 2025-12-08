@@ -83,7 +83,7 @@ void Protocol::handle_end([[maybe_unused]] std::string& cmd) {
 }
 
 void Protocol::handle_about([[maybe_unused]] std::string& cmd) {
-    std::cout << "name=\"pbrain-gomoku-ai\", version=\"1.0\", author=\"Mael\", country=\"FR\"" << std::endl;
+    std::cout << "name=\"pbrain-gomoku-ai\", version=\"1.0\", author=\"Mael-Tristan\", country=\"FR\"" << std::endl;
 }
 
 void Protocol::handle_command(std::string& cmd) {

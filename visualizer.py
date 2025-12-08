@@ -39,7 +39,7 @@ class GomokuVisualizer:
 
         self.btn_next = tk.Button(nav_frame, text="Next >>", command=self.go_next)
         self.btn_next.pack(side=tk.RIGHT)
-        
+
         self.btn_reset = tk.Button(self.controls, text="Reset View", command=self.reset_view, bg="#ffcccc")
         self.btn_reset.pack(side=tk.TOP, pady=2)
 
@@ -56,6 +56,7 @@ class GomokuVisualizer:
         self.history = [] # List of tuples: (move_num, info_str, board_grid)
         self.current_index = -1
         self.last_mtime = 0
+        self.last_file_size = 0
 
         self.draw_grid()
         self.refresh_loop()
@@ -80,9 +81,20 @@ class GomokuVisualizer:
 
         try:
             mtime = os.path.getmtime(self.log_file)
-            if mtime == self.last_mtime:
-                return # No file change
+            size = os.path.getsize(self.log_file)
+
+            # Detect file reset (smaller size)
+            if size < self.last_file_size:
+                self.reset_view()
+                self.last_file_size = size
+                self.last_mtime = mtime
+                return
+
+            if mtime == self.last_mtime and size == self.last_file_size:
+                return # No change
+
             self.last_mtime = mtime
+            self.last_file_size = size
 
             with open(self.log_file, 'r') as f:
                 lines = [line.rstrip() for line in f]
@@ -102,7 +114,7 @@ class GomokuVisualizer:
 
                     # Look for board start (first line of dashes)
                     board_start = -1
-                    for k in range(i, min(i + 10, len(lines))):
+                    for k in range(i, min(i + 15, len(lines))):
                         if len(lines[k]) == 20 and all(c in '-OX' for c in lines[k]):
                             board_start = k
                             break
@@ -127,22 +139,42 @@ class GomokuVisualizer:
                 i += 1
 
             # Update history
-            if len(new_history) > len(self.history):
-                # New moves arrived
+            if len(new_history) != len(self.history):
                 self.history = new_history
-                self.slider.config(to=len(self.history) - 1)
+                self.slider.config(to=max(0, len(self.history) - 1))
 
-                # If in Live mode, jump to end
+                # Auto-follow logic
                 if self.live_var.get():
                     self.current_index = len(self.history) - 1
                     self.slider.set(self.current_index)
                     self.update_display()
                 else:
-                    # Update label limits even if not moving
                     self.update_ui_labels()
 
         except Exception as e:
             print(f"Log parse error: {e}")
+
+    def find_winning_line(self, grid):
+        # Check rows, cols, diagonals for 5 consecutive same chars (O or X)
+        dirs = [(0, 1), (1, 0), (1, 1), (1, -1)]
+
+        for y in range(BOARD_SIZE):
+            for x in range(BOARD_SIZE):
+                player = grid[y][x]
+                if player not in ('O', 'X'):
+                    continue
+
+                for dy, dx in dirs:
+                    path = []
+                    for k in range(5):
+                        ny, nx = y + k*dy, x + k*dx
+                        if 0 <= ny < BOARD_SIZE and 0 <= nx < BOARD_SIZE and grid[ny][nx] == player:
+                            path.append((nx, ny))
+                        else:
+                            break
+                    if len(path) == 5:
+                        return path # List of (x, y) tuples
+        return None
 
     def update_display(self):
         if not self.history or self.current_index < 0:
@@ -152,8 +184,11 @@ class GomokuVisualizer:
         self.info_label.config(text=state['info'])
 
         self.canvas.delete("stone")
+        self.canvas.delete("win_line") # Clear old winning line
+
         grid = state['board']
 
+        # Draw stones
         for y in range(BOARD_SIZE):
             for x in range(BOARD_SIZE):
                 char = grid[y][x]
@@ -167,7 +202,16 @@ class GomokuVisualizer:
 
                     self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline=outline, width=2, tags="stone")
 
-                    # Highlight last played stone logic could go here if we diffed with prev state
+        # Highlight winning line
+        win_path = self.find_winning_line(grid)
+        if win_path:
+            # Draw line through first and last stone
+            start_x = OFFSET + win_path[0][0] * CELL_SIZE
+            start_y = OFFSET + win_path[0][1] * CELL_SIZE
+            end_x = OFFSET + win_path[-1][0] * CELL_SIZE
+            end_y = OFFSET + win_path[-1][1] * CELL_SIZE
+
+            self.canvas.create_line(start_x, start_y, end_x, end_y, fill="red", width=4, tags="win_line")
 
         self.update_ui_labels()
 
@@ -178,13 +222,14 @@ class GomokuVisualizer:
 
     def go_prev(self):
         if self.current_index > 0:
-            self.live_var.set(False) # Stop auto-follow
+            self.live_var.set(False)
             self.current_index -= 1
             self.slider.set(self.current_index)
             self.update_display()
 
     def go_next(self):
         if self.current_index < len(self.history) - 1:
+            self.live_var.set(False)
             self.current_index += 1
             self.slider.set(self.current_index)
             self.update_display()
@@ -192,7 +237,9 @@ class GomokuVisualizer:
     def on_slider_change(self, val):
         idx = int(val)
         if 0 <= idx < len(self.history):
-            self.live_var.set(False) # User interaction stops live mode
+            # Only disable live if user manually moved slider away from end
+            if idx != len(self.history) - 1:
+                self.live_var.set(False)
             self.current_index = idx
             self.update_display()
 
@@ -200,18 +247,21 @@ class GomokuVisualizer:
         self.history = []
         self.current_index = -1
         self.canvas.delete("stone")
+        self.canvas.delete("win_line")
         self.info_label.config(text="History cleared")
         self.lbl_move.config(text="0 / 0")
         self.slider.config(to=0)
         self.slider.set(0)
-        # Force re-read of log from scratch next cycle? 
-        # Actually, better to just clear memory. Next parse_full_log will re-read file.
-        # If file still has old data, it will reappear.
-        # Ideally, user should 'rm board.log' then click this, or we handle 'sessions'.
-        
+        # Mark current file size as the "read up to here" point so we don't reload old data
+        if os.path.exists(self.log_file):
+             self.last_file_size = os.path.getsize(self.log_file)
+             self.last_mtime = os.path.getmtime(self.log_file)
+        else:
+             self.last_file_size = 0
+
     def refresh_loop(self):
         self.parse_full_log()
-        self.root.after(500, self.refresh_loop)
+        self.root.after(200, self.refresh_loop) # Faster refresh for live feel
 
 if __name__ == "__main__":
     root = tk.Tk()

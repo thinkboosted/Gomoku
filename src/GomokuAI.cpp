@@ -103,28 +103,36 @@ int pattern_score(const LineStats& ls) {
 // Detect "split" threats like XX.XX or XX.X that do not look like an immediate 4 but are very strong next-turn attacks.
 int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
     auto cell = [&](int offset) {
-        if (offset == 0) return player; // we assume we play here
+        if (offset == 0) return player; // assume we play here
         int nx = x + offset * dx;
         int ny = y + offset * dy;
-        if (nx < 0 || nx >= static_cast<int>(board.size()) || ny < 0 || ny >= static_cast<int>(board[0].size())) return -1; // treated as blocked
+        if (nx < 0 || nx >= static_cast<int>(board.size()) || ny < 0 || ny >= static_cast<int>(board[0].size())) return -1; // blocked by border
         return board[nx][ny];
     };
 
-    // Examine sliding windows of length 5 around the target move (offsets -4..+4).
     int best = 0;
     for (int start = -4; start <= 0; ++start) {
         int stones = 0;
         int segments = 0;
         int max_seg = 0;
+        int empties = 0;
         bool blocked = false;
         int cur = 0;
+
         for (int i = 0; i < 5; ++i) {
             int v = cell(start + i);
             if (v == player) {
                 stones++;
                 cur++;
-            } else {
-                if (v == -1) blocked = true;
+            } else if (v == 0) {
+                empties++;
+                if (cur > 0) {
+                    segments++;
+                    if (cur > max_seg) max_seg = cur;
+                    cur = 0;
+                }
+            } else { // opponent or border
+                blocked = true;
                 if (cur > 0) {
                     segments++;
                     if (cur > max_seg) max_seg = cur;
@@ -137,9 +145,10 @@ int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y
             if (cur > max_seg) max_seg = cur;
         }
 
-        if (blocked) continue; // window crosses border; ignore
+        if (blocked) continue;          // invalid window (opponent/border)
+        if (empties == 0) continue;     // no gap present: ignore, avoids false positives when the gap is déjà occupée
 
-        // Reward non-contiguous threats that sum to strong shapes.
+        // Reward non-contiguous threats that rely on at least one real gap.
         if (stones == 4 && max_seg <= 2 && segments >= 2) {
             best = std::max(best, 60000); // XX.XX style hidden four
         } else if (stones == 3 && max_seg <= 2 && segments >= 2) {
@@ -255,6 +264,63 @@ Point GomokuAI::find_best_move() {
     // If the board somehow appears empty (fallback), search all cells.
     if (max_x == -1) {
         start_x = 0; end_x = width - 1; start_y = 0; end_y = height - 1;
+    }
+
+    auto would_win = [&](int px, int py, int player) {
+        board[px][py] = player;
+        bool win = (evaluate_line(px, py, player) >= 5);
+        board[px][py] = 0;
+        return win;
+    };
+
+    // Threat search (shallow): find a move that guarantees a win next turn regardless of opponent reply.
+    for (int x = start_x; x <= end_x; ++x) {
+        for (int y = start_y; y <= end_y; ++y) {
+            if (board[x][y] != 0) continue;
+
+            // Immediate win already caught.
+            if (would_win(x, y, me)) return Point{x, y};
+
+            // Simulate our move.
+            board[x][y] = me;
+
+            bool forced = true;
+            int opp_start_x = std::max(0, x - margin);
+            int opp_end_x   = std::min(width - 1, x + margin);
+            int opp_start_y = std::max(0, y - margin);
+            int opp_end_y   = std::min(height - 1, y + margin);
+
+            for (int ox = opp_start_x; ox <= opp_end_x && forced; ++ox) {
+                for (int oy = opp_start_y; oy <= opp_end_y && forced; ++oy) {
+                    if (board[ox][oy] != 0) continue;
+
+                    // If opponent can win directly, our move is bad.
+                    if (would_win(ox, oy, opponent)) { forced = false; break; }
+
+                    // Opponent plays (ox,oy), can we still win immediately?
+                    board[ox][oy] = opponent;
+                    bool can_reply_win = false;
+                    int my_start_x = std::max(0, ox - margin);
+                    int my_end_x   = std::min(width - 1, ox + margin);
+                    int my_start_y = std::max(0, oy - margin);
+                    int my_end_y   = std::min(height - 1, oy + margin);
+
+                    for (int rx = my_start_x; rx <= my_end_x && !can_reply_win; ++rx) {
+                        for (int ry = my_start_y; ry <= my_end_y && !can_reply_win; ++ry) {
+                            if (board[rx][ry] != 0) continue;
+                            if (would_win(rx, ry, me)) {
+                                can_reply_win = true;
+                            }
+                        }
+                    }
+                    board[ox][oy] = 0;
+                    if (!can_reply_win) forced = false;
+                }
+            }
+
+            board[x][y] = 0;
+            if (forced) return Point{x, y};
+        }
     }
 
     for (int x = start_x; x <= end_x; ++x) {

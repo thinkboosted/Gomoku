@@ -32,10 +32,27 @@ static void test_block_opponent_win() {
     assert(p.x == 4 && p.y == 4 && "Should block opponent's immediate win");
 }
 
+static void test_avoid_weak_closed_four() {
+    GomokuAI ai;
+    ai.init(10);
+
+    // Our horizontal three with opponent glued to one end: playing at (4,5) would only make a closed four.
+    place(ai, {{5,5},{6,5},{7,5}}, 1);
+    place(ai, {{8,5}}, 2); // blocks one side
+
+    // A better offensive option: extend vertical chain to an open three at (2,4).
+    place(ai, {{2,2},{2,3}}, 1);
+    place(ai, {{2,0}}, 2); // close the lower end so (2,1) is weaker
+
+    Point p = ai.find_best_move();
+    assert(p.x == 2 && p.y == 4 && "Should prefer creating an open three over pushing a blocked four");
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
     test_block_opponent_win();
+    test_avoid_weak_closed_four();
     std::cout << "All tests passed\n";
     return 0;
 }

@@ -296,11 +296,35 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     int score = 0;
     int dir_attack_scores[4] = {0,0,0,0};
 
+    // Detect whether a blocked end is specifically blocked by an adjacent opponent stone.
+    auto blocked_by_adjacent_opponent = [&](int dx, int dy, bool forward) {
+        int step_x = forward ? dx : -dx;
+        int step_y = forward ? dy : -dy;
+        int nx = x + step_x;
+        int ny = y + step_y;
+        while (nx >= 0 && nx < width && ny >= 0 && ny < height && board[nx][ny] == me) {
+            nx += step_x;
+            ny += step_y;
+        }
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) return false; // border is not “collé adversaire”
+        return board[nx][ny] == opponent;
+    };
+
     // Attack: how strong we become if we play here.
     for (int i = 0; i < 4; ++i) {
         auto& d = dirs[i];
         detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
         int s = detail::pattern_score(ls) + detail::gapped_threat_score(board, x, y, d[0], d[1], me);
+
+        // If playing here only makes a closed four whose blocked side is an adjacent opponent stone,
+        // downweight it (opponent already sits on the only exit). Prefer other openings unless forked.
+        if (ls.count == 4 && (ls.open1 ^ ls.open2)) {
+            bool blocked_forward = (!ls.open1) && blocked_by_adjacent_opponent(d[0], d[1], true);
+            bool blocked_backward = (!ls.open2) && blocked_by_adjacent_opponent(d[0], d[1], false);
+            if (blocked_forward || blocked_backward) {
+                s = std::min(s, 8'000); // favor autre ouverture sauf si compensé par un fork
+            }
+        }
         dir_attack_scores[i] = s;
         score += s;
     }

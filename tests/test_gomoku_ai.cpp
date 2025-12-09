@@ -63,12 +63,29 @@ static void test_avoid_neutral_filler() {
     assert(p.x == 1 && p.y == 3 && "Should pick the meaningful extension over neutral central filler");
 }
 
+static void test_block_open_three_over_filler() {
+    GomokuAI ai;
+    ai.init(9);
+
+    // Opponent has an open three vertical at x=4 (positions y=1,2,3). Ends y=0 and y=4 are open.
+    place(ai, {{4,1},{4,2},{4,3}}, 2);
+
+    // Add neutral stones near center to tempt proximity/centrality.
+    place(ai, {{2,2},{2,3},{3,2}}, 1);
+
+    Point p = ai.find_best_move();
+    bool blocks_top = (p.x == 4 && p.y == 0);
+    bool blocks_bottom = (p.x == 4 && p.y == 4);
+    assert((blocks_top || blocks_bottom) && "Should block opponent open three instead of a neutral move");
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
     test_block_opponent_win();
     test_avoid_weak_closed_four();
     test_avoid_neutral_filler();
+    test_block_open_three_over_filler();
     std::cout << "All tests passed\n";
     return 0;
 }

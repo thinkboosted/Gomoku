@@ -100,6 +100,55 @@ int pattern_score(const LineStats& ls) {
     return (ls.open1 || ls.open2) ? 40 : 10;
 }
 
+// Detect "split" threats like XX.XX or XX.X that do not look like an immediate 4 but are very strong next-turn attacks.
+int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
+    auto cell = [&](int offset) {
+        if (offset == 0) return player; // we assume we play here
+        int nx = x + offset * dx;
+        int ny = y + offset * dy;
+        if (nx < 0 || nx >= static_cast<int>(board.size()) || ny < 0 || ny >= static_cast<int>(board[0].size())) return -1; // treated as blocked
+        return board[nx][ny];
+    };
+
+    // Examine sliding windows of length 5 around the target move (offsets -4..+4).
+    int best = 0;
+    for (int start = -4; start <= 0; ++start) {
+        int stones = 0;
+        int segments = 0;
+        int max_seg = 0;
+        bool blocked = false;
+        int cur = 0;
+        for (int i = 0; i < 5; ++i) {
+            int v = cell(start + i);
+            if (v == player) {
+                stones++;
+                cur++;
+            } else {
+                if (v == -1) blocked = true;
+                if (cur > 0) {
+                    segments++;
+                    if (cur > max_seg) max_seg = cur;
+                    cur = 0;
+                }
+            }
+        }
+        if (cur > 0) {
+            segments++;
+            if (cur > max_seg) max_seg = cur;
+        }
+
+        if (blocked) continue; // window crosses border; ignore
+
+        // Reward non-contiguous threats that sum to strong shapes.
+        if (stones == 4 && max_seg <= 2 && segments >= 2) {
+            best = std::max(best, 60000); // XX.XX style hidden four
+        } else if (stones == 3 && max_seg <= 2 && segments >= 2) {
+            best = std::max(best, 2500); // XX.X or X.XX split three
+        }
+    }
+    return best;
+}
+
 int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
 
@@ -109,6 +158,7 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     for (auto& d : dirs) {
         LineStats ls = get_line_stats(board, x, y, d[0], d[1], me);
         score += pattern_score(ls);
+        score += gapped_threat_score(board, x, y, d[0], d[1], me);
     }
 
     // Defense: how much danger we neutralize from the opponent by occupying this point.
@@ -116,6 +166,7 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
         LineStats ls_opp = get_line_stats(board, x, y, d[0], d[1], opponent);
         // A blocking move both prevents their pattern and often creates ours; keep weight high.
         score += pattern_score(ls_opp) * 9 / 10;
+        score += gapped_threat_score(board, x, y, d[0], d[1], opponent) * 8 / 10;
     }
 
     // Proximity: avoid isolated plays; prefer to stay within two cells of any stone.

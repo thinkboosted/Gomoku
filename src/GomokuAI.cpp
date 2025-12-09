@@ -148,6 +148,16 @@ int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y
         if (blocked) continue;          // invalid window (opponent/border)
         if (empties == 0) continue;     // no gap present: ignore, avoids false positives when the gap is déjà occupée
 
+        // Require at least one open end outside the 5-cell window; if both ends are border/our stones, the threat is not urgent.
+        auto open_end = [&](int offset) {
+            int nx = x + offset * dx;
+            int ny = y + offset * dy;
+            if (nx < 0 || nx >= static_cast<int>(board.size()) || ny < 0 || ny >= static_cast<int>(board[0].size())) return false; // border counts as closed
+            return board[nx][ny] == 0;
+        };
+        bool has_open_end = open_end(start - 1) || open_end(start + 5);
+        if (!has_open_end) continue;
+
         // Reward non-contiguous threats that rely on at least one real gap.
         if (stones == 4 && max_seg <= 2 && segments >= 2) {
             best = std::max(best, 60000); // XX.XX style hidden four

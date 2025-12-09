@@ -153,12 +153,15 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
 
     int score = 0;
+    int dir_attack_scores[4] = {0,0,0,0};
 
     // Attack: how strong we become if we play here.
-    for (auto& d : dirs) {
+    for (int i = 0; i < 4; ++i) {
+        auto& d = dirs[i];
         LineStats ls = get_line_stats(board, x, y, d[0], d[1], me);
-        score += pattern_score(ls);
-        score += gapped_threat_score(board, x, y, d[0], d[1], me);
+        int s = pattern_score(ls) + gapped_threat_score(board, x, y, d[0], d[1], me);
+        dir_attack_scores[i] = s;
+        score += s;
     }
 
     // Defense: how much danger we neutralize from the opponent by occupying this point.
@@ -168,6 +171,12 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
         score += pattern_score(ls_opp) * 9 / 10;
         score += gapped_threat_score(board, x, y, d[0], d[1], opponent) * 8 / 10;
     }
+
+    // Threat multiplicity: bonus when the move is strong in two directions (fork potential).
+    std::array<int,4> tmp = {dir_attack_scores[0], dir_attack_scores[1], dir_attack_scores[2], dir_attack_scores[3]};
+    std::sort(tmp.begin(), tmp.end(), std::greater<int>());
+    int fork_bonus = (tmp[0] + tmp[1]) / 3; // lighter than raw sum to avoid overpowering
+    score += fork_bonus;
 
     // Proximity: avoid isolated plays; prefer to stay within two cells of any stone.
     int neighbor_score = 0;

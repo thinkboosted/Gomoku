@@ -293,8 +293,11 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     // Heuristic mix: attack + defense + fork bonus + proximity + center bias.
     static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
 
-    int score = 0;
     int dir_attack_scores[4] = {0,0,0,0};
+    int attack_total = 0;
+    int defense_total = 0;
+    bool meaningful_attack = false;
+    bool meaningful_defense = false;
 
     // Detect whether a blocked end is specifically blocked by an adjacent opponent stone.
     auto blocked_by_adjacent_opponent = [&](int dx, int dy, bool forward) {
@@ -325,23 +328,31 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
                 s = std::min(s, 8'000); // favor autre ouverture sauf si compensé par un fork
             }
         }
+        if (!meaningful_attack && (detail::pattern_score(ls) >= 2'000 || detail::gapped_threat_score(board, x, y, d[0], d[1], me) > 0)) {
+            meaningful_attack = true;
+        }
         dir_attack_scores[i] = s;
-        score += s;
+        attack_total += s;
     }
 
     // Defense: how much danger we neutralize from the opponent by occupying this point.
     for (auto& d : dirs) {
         detail::LineStats ls_opp = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
+        int p = detail::pattern_score(ls_opp);
+        int g = detail::gapped_threat_score(board, x, y, d[0], d[1], opponent);
         // A blocking move both prevents their pattern and often creates ours; keep weight high.
-        score += detail::pattern_score(ls_opp) * 9 / 10;
-        score += detail::gapped_threat_score(board, x, y, d[0], d[1], opponent) * 8 / 10;
+        defense_total += p * 9 / 10;
+        defense_total += g * 8 / 10;
+        if (!meaningful_defense && (p >= 2'000 || g > 0)) {
+            meaningful_defense = true;
+        }
     }
 
     // Threat multiplicity: bonus when the move is strong in two directions (fork potential).
     std::array<int,4> tmp = {dir_attack_scores[0], dir_attack_scores[1], dir_attack_scores[2], dir_attack_scores[3]};
     std::sort(tmp.begin(), tmp.end(), std::greater<int>());
     int fork_bonus = (tmp[0] + tmp[1]) / 3; // lighter than raw sum to avoid overpowering
-    score += fork_bonus;
+    int extra_score = fork_bonus;
 
     // Proximity: avoid isolated plays; prefer to stay within two cells of any stone.
     int neighbor_score = 0;
@@ -356,15 +367,21 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
             }
         }
     }
-    score += neighbor_score * 15;
+    extra_score += neighbor_score * 15;
 
     // Centrality heuristic: Playing near the center offers more growth potential in all directions.
     int cx = width / 2;
     int cy = height / 2;
     int dist = std::abs(x - cx) + std::abs(y - cy);
-    score += (200 - dist * 5);
+    extra_score += (200 - dist * 5);
 
-    return score;
+    // If the move neither creates nor blocks at least a (closed) three or gapped threat,
+    // downweight soft bonuses so we avoid neutral filler moves.
+    if (!meaningful_attack && !meaningful_defense) {
+        extra_score /= 2;
+    }
+
+    return attack_total + defense_total + extra_score;
 }
 
 int GomokuAI::evaluate_line(int x, int y, int player) {

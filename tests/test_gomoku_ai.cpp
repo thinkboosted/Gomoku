@@ -48,11 +48,27 @@ static void test_avoid_weak_closed_four() {
     assert(p.x == 2 && p.y == 4 && "Should prefer creating an open three over pushing a blocked four");
 }
 
+static void test_avoid_neutral_filler() {
+    GomokuAI ai;
+    ai.init(10);
+
+    // We have a promising vertical extension: playing (1,3) makes a closed three (and can become open later).
+    place(ai, {{1,1},{1,2}}, 1);
+
+    // Add some stones near center to tempt proximity/centrality without real threat.
+    place(ai, {{5,5}}, 2);
+    place(ai, {{5,6}}, 1);
+
+    Point p = ai.find_best_move();
+    assert(p.x == 1 && p.y == 3 && "Should pick the meaningful extension over neutral central filler");
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
     test_block_opponent_win();
     test_avoid_weak_closed_four();
+    test_avoid_neutral_filler();
     std::cout << "All tests passed\n";
     return 0;
 }

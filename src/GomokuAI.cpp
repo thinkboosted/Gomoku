@@ -3,6 +3,7 @@
 #include <ctime>
 #include <algorithm>
 #include <cmath>
+#include <array>
 
 GomokuAI::GomokuAI() : width(20), height(20) {
     srand(static_cast<unsigned>(time(NULL)));
@@ -51,33 +52,92 @@ int evaluate_dir(const std::vector<std::vector<int>>& board, int x, int y, int d
     return 1 + count_consecutive(board, x, y, dx, dy, player) + count_consecutive(board, x, y, -dx, -dy, player);
 }
 
-int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
-    int score = 0;
-    int dirs[4][2] = {{1,0}, {0,1}, {1,1}, {1,-1}};
+struct LineStats {
+    int count;
+    bool open1;
+    bool open2;
+};
 
-    // We assign weights to patterns. 
-    // Attack (me) is prioritized (1M) to ensure we take the win if available.
-    // Defense (opponent) is high (500k) to force a block if they are about to win.
-    for(auto& d : dirs) {
-        // Offensive Score
-        int my_len = evaluate_dir(board, x, y, d[0], d[1], me);
-        if (my_len >= 5) return 1000000;
-        if (my_len == 4) score += 10000;
-        if (my_len == 3) score += 1000;
-        if (my_len == 2) score += 100;
+// Collect how many aligned stones we would have by playing (x,y) and whether each end stays open.
+LineStats get_line_stats(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
+    int w = board.size();
+    int h = board[0].size();
 
-        // Defensive Score
-        int op_len = evaluate_dir(board, x, y, d[0], d[1], opponent);
-        if (op_len >= 5) return 500000;
-        if (op_len == 4) score += 8000;
-        if (op_len == 3) score += 500;
+    int count = 1; // include the stone we are about to play
+    bool open1 = false;
+    bool open2 = false;
+
+    int nx = x + dx;
+    int ny = y + dy;
+    while (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == player) {
+        count++;
+        nx += dx;
+        ny += dy;
     }
+    if (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == 0) open1 = true;
+
+    nx = x - dx;
+    ny = y - dy;
+    while (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == player) {
+        count++;
+        nx -= dx;
+        ny -= dy;
+    }
+    if (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == 0) open2 = true;
+
+    return {count, open1, open2};
+}
+
+int pattern_score(const LineStats& ls) {
+    // Strongly reward open ended shapes, modestly reward closed shapes.
+    if (ls.count >= 5) return 1'000'000'000; // instant win
+    if (ls.count == 4 && ls.open1 && ls.open2) return 200'000; // open four
+    if (ls.count == 4 && (ls.open1 || ls.open2)) return 50'000;  // closed four
+    if (ls.count == 3 && ls.open1 && ls.open2) return 15'000; // open three (threat to become four)
+    if (ls.count == 3 && (ls.open1 || ls.open2)) return 2'000;  // closed three
+    if (ls.count == 2 && ls.open1 && ls.open2) return 800;
+    if (ls.count == 2 && (ls.open1 || ls.open2)) return 150;
+    return (ls.open1 || ls.open2) ? 40 : 10;
+}
+
+int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
+    static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
+
+    int score = 0;
+
+    // Attack: how strong we become if we play here.
+    for (auto& d : dirs) {
+        LineStats ls = get_line_stats(board, x, y, d[0], d[1], me);
+        score += pattern_score(ls);
+    }
+
+    // Defense: how much danger we neutralize from the opponent by occupying this point.
+    for (auto& d : dirs) {
+        LineStats ls_opp = get_line_stats(board, x, y, d[0], d[1], opponent);
+        // A blocking move both prevents their pattern and often creates ours; keep weight high.
+        score += pattern_score(ls_opp) * 9 / 10;
+    }
+
+    // Proximity: avoid isolated plays; prefer to stay within two cells of any stone.
+    int neighbor_score = 0;
+    for (int dx = -2; dx <= 2; ++dx) {
+        for (int dy = -2; dy <= 2; ++dy) {
+            if (dx == 0 && dy == 0) continue;
+            int nx = x + dx;
+            int ny = y + dy;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height && board[nx][ny] != 0) {
+                int dist = std::abs(dx) + std::abs(dy);
+                neighbor_score += (5 - dist); // closer neighbors give more weight
+            }
+        }
+    }
+    score += neighbor_score * 15;
 
     // Centrality heuristic: Playing near the center offers more growth potential in all directions.
     int cx = width / 2;
     int cy = height / 2;
     int dist = std::abs(x - cx) + std::abs(y - cy);
-    score += (40 - dist);
+    score += (200 - dist * 5);
 
     return score;
 }
@@ -109,34 +169,52 @@ Point GomokuAI::find_best_move() {
     }
     if (empty) return {width/2, height/2};
 
-    // Infer player IDs based on stone count to determine turn order
-    int stones1 = 0;
-    int stones2 = 0;
-    for(const auto& row : board) {
-        for(int cell : row) {
-            if (cell == 1) stones1++;
-            else if (cell == 2) stones2++;
-        }
-    }
-    int me = (stones1 > stones2) ? 2 : 1;
-    if (stones1 == stones2) me = 1;
-    int opponent = (me == 1) ? 2 : 1;
+    // Player IDs are fixed by protocol: we are 1, opponent is 2.
+    const int me = 1;
+    const int opponent = 2;
 
+    // Limit search to a small band around existing stones to avoid useless far moves.
+    int min_x = width, max_x = -1, min_y = height, max_y = -1;
     for (int x = 0; x < width; ++x) {
         for (int y = 0; y < height; ++y) {
+            if (board[x][y] != 0) {
+                min_x = std::min(min_x, x);
+                max_x = std::max(max_x, x);
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
+            }
+        }
+    }
+
+    int margin = 2;
+    int start_x = std::max(0, min_x - margin);
+    int end_x = std::min(width - 1, max_x + margin);
+    int start_y = std::max(0, min_y - margin);
+    int end_y = std::min(height - 1, max_y + margin);
+
+    // If the board somehow appears empty (fallback), search all cells.
+    if (max_x == -1) {
+        start_x = 0; end_x = width - 1; start_y = 0; end_y = height - 1;
+    }
+
+    for (int x = start_x; x <= end_x; ++x) {
+        for (int y = start_y; y <= end_y; ++y) {
             if (board[x][y] != 0) continue;
 
-            int score = 0;
+            // Priority 1: Winning move
+            if (evaluate_line(x, y, me) >= 5) return {x, y};
 
-            // Priority 1: Win immediately
-            if (evaluate_line(x, y, me) >= 5) score += 100000;
+            // Priority 2: Block opponent's win
+            if (evaluate_line(x, y, opponent) >= 5) {
+                int block_score = 300'000; // ensure blocks beat heuristic plays
+                if (block_score > best_score) {
+                    best_score = block_score;
+                    best_move = {x, y};
+                }
+                continue;
+            }
 
-            // Priority 2: Block immediate loss
-            if (evaluate_line(x, y, opponent) >= 5) score += 50000;
-
-            // Priority 3: Strategic value (Open 4, Open 3, Center)
-            score += evaluate_position(x, y, me, opponent);
-
+            int score = evaluate_position(x, y, me, opponent);
             if (score > best_score) {
                 best_score = score;
                 best_move = {x, y};
@@ -144,7 +222,7 @@ Point GomokuAI::find_best_move() {
         }
     }
 
-    // Fallback: If no clear strategic move is found, play closest to center to maintain pressure.
+    // Fallback: play closest to center if nothing else is chosen.
     if (best_move.x == -1) {
         int min_dist = 10000;
         for (int x = 0; x < width; ++x) {

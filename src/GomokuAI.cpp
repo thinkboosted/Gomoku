@@ -33,7 +33,7 @@ Point GomokuAI::parse_coordinates(const std::string& s) {
     }
 }
 
-// Helper to count consecutive stones in a specific direction
+// Count aligned stones for `player` in one direction (excluding origin), up to 4 steps.
 int count_consecutive(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
     int count = 0;
     int w = board.size();
@@ -47,16 +47,77 @@ int count_consecutive(const std::vector<std::vector<int>>& board, int x, int y, 
     return count;
 }
 
-// Helper to evaluate a full line (forward and backward) through a point
+// Evaluate the length of a line through (x,y) by looking both directions (includes the move).
 int evaluate_dir(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
     return 1 + count_consecutive(board, x, y, dx, dy, player) + count_consecutive(board, x, y, -dx, -dy, player);
 }
 
+// Compute max line length through (x,y) for `player` across 4 directions.
+int evaluate_line_local(const std::vector<std::vector<int>>& board, int x, int y, int player) {
+    int max_len = 0;
+    int dirs[4][2] = {{1,0}, {0,1}, {1,1}, {1,-1}};
+    for(auto& d : dirs) {
+        int len = evaluate_dir(board, x, y, d[0], d[1], player);
+        if (len > max_len) max_len = len;
+    }
+    return max_len;
+}
+
+// Aggregated info for a line: stones count and openness at each end.
 struct LineStats {
     int count;
     bool open1;
     bool open2;
 };
+
+// Search bounds for pruning: window around existing stones.
+struct Bounds {
+    int start_x;
+    int end_x;
+    int start_y;
+    int end_y;
+};
+
+// Check if coordinates are inside board limits.
+bool is_inside(const std::vector<std::vector<int>>& board, int x, int y) {
+    return x >= 0 && y >= 0 && x < static_cast<int>(board.size()) && y < static_cast<int>(board[0].size());
+}
+
+// True if no stones are placed.
+bool board_is_empty(const std::vector<std::vector<int>>& board) {
+    for (const auto& row : board) {
+        for (int cell : row) if (cell != 0) return false;
+    }
+    return true;
+}
+
+// Compute a rectangular window covering all stones, expanded by `margin`.
+Bounds compute_bounds(const std::vector<std::vector<int>>& board, int margin) {
+    int w = board.size();
+    int h = board.empty() ? 0 : board[0].size();
+    int min_x = w, max_x = -1, min_y = h, max_y = -1;
+    for (int x = 0; x < w; ++x) {
+        for (int y = 0; y < h; ++y) {
+            if (board[x][y] != 0) {
+                min_x = std::min(min_x, x);
+                max_x = std::max(max_x, x);
+                min_y = std::min(min_y, y);
+                max_y = std::max(max_y, y);
+            }
+        }
+    }
+
+    Bounds b;
+    if (max_x == -1) { // empty board fallback
+        b.start_x = 0; b.end_x = w - 1; b.start_y = 0; b.end_y = h - 1;
+    } else {
+        b.start_x = std::max(0, min_x - margin);
+        b.end_x   = std::min(w - 1, max_x + margin);
+        b.start_y = std::max(0, min_y - margin);
+        b.end_y   = std::min(h - 1, max_y + margin);
+    }
+    return b;
+}
 
 // Collect how many aligned stones we would have by playing (x,y) and whether each end stays open.
 LineStats get_line_stats(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
@@ -88,8 +149,8 @@ LineStats get_line_stats(const std::vector<std::vector<int>>& board, int x, int 
     return {count, open1, open2};
 }
 
+// Score contiguous patterns (open/closed 2/3/4/5) for attack or defense.
 int pattern_score(const LineStats& ls) {
-    // Strongly reward open ended shapes, modestly reward closed shapes.
     if (ls.count >= 5) return 1'000'000'000; // instant win
     if (ls.count == 4 && ls.open1 && ls.open2) return 200'000; // open four
     if (ls.count == 4 && (ls.open1 || ls.open2)) return 50'000;  // closed four
@@ -100,7 +161,7 @@ int pattern_score(const LineStats& ls) {
     return (ls.open1 || ls.open2) ? 40 : 10;
 }
 
-// Detect "split" threats like XX.XX or XX.X that do not look like an immediate 4 but are very strong next-turn attacks.
+// Score split threats (XX.XX, XX.X) requiring a real gap and at least one open end.
 int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
     auto cell = [&](int offset) {
         if (offset == 0) return player; // assume we play here
@@ -169,6 +230,7 @@ int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y
 }
 
 int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
+    // Heuristic mix: attack + defense + fork bonus + proximity + center bias.
     static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
 
     int score = 0;
@@ -222,119 +284,84 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
 }
 
 int GomokuAI::evaluate_line(int x, int y, int player) {
-    int max_len = 0;
-    int dirs[4][2] = {{1,0}, {0,1}, {1,1}, {1,-1}};
-    for(auto& d : dirs) {
-        int len = evaluate_dir(board, x, y, d[0], d[1], player);
-        if (len > max_len) max_len = len;
-    }
-    return max_len;
+    return evaluate_line_local(board, x, y, player);
 }
 
 Point GomokuAI::find_best_move() {
+    // Main policy: center on empty board, forced-win scan, then heuristic best.
     int best_score = -1;
     Point best_move = {-1, -1};
 
     // Strategy: If the board is empty, the center is statistically the best start.
-    bool empty = true;
-    for(const auto& row : board) {
-        for(int cell : row) {
-            if(cell != 0) {
-                empty = false;
-                break;
-            }
-        }
-        if(!empty) break;
-    }
-    if (empty) return {width/2, height/2};
+    if (board_is_empty(board)) return {width/2, height/2};
 
     // Player IDs are fixed by protocol: we are 1, opponent is 2.
     const int me = 1;
     const int opponent = 2;
 
-    // Limit search to a small band around existing stones to avoid useless far moves.
-    int min_x = width, max_x = -1, min_y = height, max_y = -1;
-    for (int x = 0; x < width; ++x) {
-        for (int y = 0; y < height; ++y) {
-            if (board[x][y] != 0) {
-                min_x = std::min(min_x, x);
-                max_x = std::max(max_x, x);
-                min_y = std::min(min_y, y);
-                max_y = std::max(max_y, y);
-            }
-        }
-    }
-
     int margin = 2;
-    int start_x = std::max(0, min_x - margin);
-    int end_x = std::min(width - 1, max_x + margin);
-    int start_y = std::max(0, min_y - margin);
-    int end_y = std::min(height - 1, max_y + margin);
-
-    // If the board somehow appears empty (fallback), search all cells.
-    if (max_x == -1) {
-        start_x = 0; end_x = width - 1; start_y = 0; end_y = height - 1;
-    }
+    Bounds b = compute_bounds(board, margin);
 
     auto would_win = [&](int px, int py, int player) {
         board[px][py] = player;
-        bool win = (evaluate_line(px, py, player) >= 5);
+        bool win = (evaluate_line_local(board, px, py, player) >= 5);
         board[px][py] = 0;
         return win;
     };
 
-    // Threat search (shallow): find a move that guarantees a win next turn regardless of opponent reply.
-    for (int x = start_x; x <= end_x; ++x) {
-        for (int y = start_y; y <= end_y; ++y) {
-            if (board[x][y] != 0) continue;
+    auto threat_search_forced_win = [&](const Bounds& bounds) -> Point {
+        for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
+            for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
+                if (board[x][y] != 0) continue;
 
-            // Immediate win already caught.
-            if (would_win(x, y, me)) return Point{x, y};
+                if (would_win(x, y, me)) return Point{x, y};
 
-            // Simulate our move.
-            board[x][y] = me;
+                board[x][y] = me;
 
-            bool forced = true;
-            int opp_start_x = std::max(0, x - margin);
-            int opp_end_x   = std::min(width - 1, x + margin);
-            int opp_start_y = std::max(0, y - margin);
-            int opp_end_y   = std::min(height - 1, y + margin);
+                bool forced = true;
+                int opp_start_x = std::max(0, x - margin);
+                int opp_end_x   = std::min(width - 1, x + margin);
+                int opp_start_y = std::max(0, y - margin);
+                int opp_end_y   = std::min(height - 1, y + margin);
 
-            for (int ox = opp_start_x; ox <= opp_end_x && forced; ++ox) {
-                for (int oy = opp_start_y; oy <= opp_end_y && forced; ++oy) {
-                    if (board[ox][oy] != 0) continue;
+                for (int ox = opp_start_x; ox <= opp_end_x && forced; ++ox) {
+                    for (int oy = opp_start_y; oy <= opp_end_y && forced; ++oy) {
+                        if (board[ox][oy] != 0) continue;
 
-                    // If opponent can win directly, our move is bad.
-                    if (would_win(ox, oy, opponent)) { forced = false; break; }
+                        if (would_win(ox, oy, opponent)) { forced = false; break; }
 
-                    // Opponent plays (ox,oy), can we still win immediately?
-                    board[ox][oy] = opponent;
-                    bool can_reply_win = false;
-                    int my_start_x = std::max(0, ox - margin);
-                    int my_end_x   = std::min(width - 1, ox + margin);
-                    int my_start_y = std::max(0, oy - margin);
-                    int my_end_y   = std::min(height - 1, oy + margin);
+                        board[ox][oy] = opponent;
+                        bool can_reply_win = false;
+                        int my_start_x = std::max(0, ox - margin);
+                        int my_end_x   = std::min(width - 1, ox + margin);
+                        int my_start_y = std::max(0, oy - margin);
+                        int my_end_y   = std::min(height - 1, oy + margin);
 
-                    for (int rx = my_start_x; rx <= my_end_x && !can_reply_win; ++rx) {
-                        for (int ry = my_start_y; ry <= my_end_y && !can_reply_win; ++ry) {
-                            if (board[rx][ry] != 0) continue;
-                            if (would_win(rx, ry, me)) {
-                                can_reply_win = true;
+                        for (int rx = my_start_x; rx <= my_end_x && !can_reply_win; ++rx) {
+                            for (int ry = my_start_y; ry <= my_end_y && !can_reply_win; ++ry) {
+                                if (board[rx][ry] != 0) continue;
+                                if (would_win(rx, ry, me)) {
+                                    can_reply_win = true;
+                                }
                             }
                         }
+                        board[ox][oy] = 0;
+                        if (!can_reply_win) forced = false;
                     }
-                    board[ox][oy] = 0;
-                    if (!can_reply_win) forced = false;
                 }
+
+                board[x][y] = 0;
+                if (forced) return Point{x, y};
             }
-
-            board[x][y] = 0;
-            if (forced) return Point{x, y};
         }
-    }
+        return Point{-1, -1};
+    };
 
-    for (int x = start_x; x <= end_x; ++x) {
-        for (int y = start_y; y <= end_y; ++y) {
+    Point forced = threat_search_forced_win(b);
+    if (forced.x != -1) return forced;
+
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
             if (board[x][y] != 0) continue;
 
             // Priority 1: Winning move

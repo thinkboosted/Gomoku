@@ -95,6 +95,21 @@ static void test_block_open_or_hidden_four() {
     assert((block_left || block_right) && "Must block opponent open/hidden fours before other plays");
 }
 
+static void test_defensive_forced_win_block() {
+    GomokuAI ai;
+    ai.init(10);
+
+    // Opponent setup: two coupled threats that win in 2 plies if they start at (4,4).
+    // Diagonal stones create dual threat after (4,4) is played: either extension to (5,5) or (3,3).
+    place(ai, {{2,2},{3,3},{5,5},{6,6}}, 2);
+
+    // Some of our stones to create alternative attractive moves near center.
+    place(ai, {{4,6},{4,5}}, 1);
+
+    Point p = ai.find_best_move();
+    assert(p.x == 4 && p.y == 4 && "Should preempt opponent 2-ply forced win starter");
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
@@ -103,6 +118,7 @@ int main() {
     test_avoid_neutral_filler();
     test_block_open_three_over_filler();
     test_block_open_or_hidden_four();
+    test_defensive_forced_win_block();
     std::cout << "All tests passed\n";
     return 0;
 }

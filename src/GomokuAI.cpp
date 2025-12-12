@@ -401,11 +401,18 @@ Point GomokuAI::find_best_move() {
     const int opponent = 2;
     static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
 
-    int margin = 2;
+    // Use a slightly larger margin on larger boards to not miss distant threats.
+    int margin = (width > 12 ? 3 : 2);
     detail::Bounds b = detail::compute_bounds(board, margin);
 
     Point forced = detail::threat_search_forced_win(board, b, margin, me, opponent, width, height);
     if (forced.x != -1) return forced;
+
+    // Defensive threat search: if the opponent has a short forced win line, occupy its start.
+    Point opp_forced = detail::threat_search_forced_win(board, b, margin, opponent, me, width, height);
+    if (opp_forced.x != -1 && board[opp_forced.x][opp_forced.y] == 0) {
+        return opp_forced;
+    }
 
     for (int x = b.start_x; x <= b.end_x; ++x) {
         for (int y = b.start_y; y <= b.end_y; ++y) {

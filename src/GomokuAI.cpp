@@ -269,6 +269,9 @@ int spaced_extension_bonus(const std::vector<std::vector<int>>& board, int x, in
 
 // Find a move that guarantees an immediate win on the next turn, regardless of opponent reply (shallow threat search).
 Point threat_search_forced_win(std::vector<std::vector<int>>& board, const Bounds& bounds, int margin, int me, int opponent, int width, int height) {
+    (void)margin;
+    (void)width;
+    (void)height;
     auto would_win = [&](int px, int py, int player) {
         board[px][py] = player;
         bool win = (evaluate_line_local(board, px, py, player) >= 5);
@@ -285,26 +288,22 @@ Point threat_search_forced_win(std::vector<std::vector<int>>& board, const Bound
             board[x][y] = me;
 
             bool forced = true;
-            int opp_start_x = std::max(0, x - margin);
-            int opp_end_x   = std::min(width - 1, x + margin);
-            int opp_start_y = std::max(0, y - margin);
-            int opp_end_y   = std::min(height - 1, y + margin);
 
-            for (int ox = opp_start_x; ox <= opp_end_x && forced; ++ox) {
-                for (int oy = opp_start_y; oy <= opp_end_y && forced; ++oy) {
+            // IMPORTANT: Do not restrict opponent replies to a tiny local window.
+            // Doing so creates false positives ("forced" sequences) and makes the AI over-defend.
+            // Using the global search bounds keeps it fast while capturing key defenses/blocks.
+            for (int ox = bounds.start_x; ox <= bounds.end_x && forced; ++ox) {
+                for (int oy = bounds.start_y; oy <= bounds.end_y && forced; ++oy) {
                     if (board[ox][oy] != 0) continue;
 
                     if (would_win(ox, oy, opponent)) { forced = false; break; }
 
                     board[ox][oy] = opponent;
                     bool can_reply_win = false;
-                    int my_start_x = std::max(0, ox - margin);
-                    int my_end_x   = std::min(width - 1, ox + margin);
-                    int my_start_y = std::max(0, oy - margin);
-                    int my_end_y   = std::min(height - 1, oy + margin);
 
-                    for (int rx = my_start_x; rx <= my_end_x && !can_reply_win; ++rx) {
-                        for (int ry = my_start_y; ry <= my_end_y && !can_reply_win; ++ry) {
+                    // Same rationale: our winning reply might be slightly outside a local window.
+                    for (int rx = bounds.start_x; rx <= bounds.end_x && !can_reply_win; ++rx) {
+                        for (int ry = bounds.start_y; ry <= bounds.end_y && !can_reply_win; ++ry) {
                             if (board[rx][ry] != 0) continue;
                             if (would_win(rx, ry, me)) {
                                 can_reply_win = true;
@@ -458,6 +457,53 @@ Point GomokuAI::find_best_move() {
     int margin = (width > 12 ? 3 : 2);
     detail::Bounds b = detail::compute_bounds(board, margin);
 
+    // Mandatory tactics first: never let a deeper heuristic/threat-search override these.
+    // 1) Win now
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            if (evaluate_line(x, y, me) >= 5) return {x, y};
+        }
+    }
+
+    // 2) Block opponent win now
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            if (evaluate_line(x, y, opponent) >= 5) return {x, y};
+        }
+    }
+
+    // 3) Block opponent hidden fours (urgent)
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            int opp_gapped = 0;
+            for (auto& d : dirs) {
+                opp_gapped = std::max(opp_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], opponent));
+            }
+            if (opp_gapped >= 60'000) return {x, y};
+        }
+    }
+
+    // 4) Create our own open/hidden four: in practice this is a winning race condition.
+    // This prevents the AI from blocking an opponent open three when we can instead
+    // create an unavoidable threat (open four / XX.XX).
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            int my_pattern = 0;
+            int my_gapped = 0;
+            for (auto& d : dirs) {
+                detail::LineStats ls_me = detail::get_line_stats(board, x, y, d[0], d[1], me);
+                my_pattern = std::max(my_pattern, detail::pattern_score(ls_me));
+                my_gapped = std::max(my_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], me));
+            }
+            if (my_pattern >= 200'000 || my_gapped >= 60'000) return {x, y};
+        }
+    }
+
+    // Threat search (2-ply) after mandatory defense.
     Point forced = detail::threat_search_forced_win(board, b, margin, me, opponent, width, height);
     if (forced.x != -1) return forced;
 
@@ -470,36 +516,6 @@ Point GomokuAI::find_best_move() {
     for (int x = b.start_x; x <= b.end_x; ++x) {
         for (int y = b.start_y; y <= b.end_y; ++y) {
             if (board[x][y] != 0) continue;
-
-            // Priority 1: Winning move
-            if (evaluate_line(x, y, me) >= 5) return {x, y};
-
-            // Priority 2: Block opponent's win
-            if (evaluate_line(x, y, opponent) >= 5) {
-                int block_score = 300'000; // ensure blocks beat heuristic plays
-                if (block_score > best_score) {
-                    best_score = block_score;
-                    best_move = {x, y};
-                }
-                continue;
-            }
-
-            // Priority 3: urgent block of opponent open/hidden fours (before generic heuristics).
-            int opp_pattern = 0;
-            int opp_gapped = 0;
-            for (auto& d : dirs) {
-                detail::LineStats ls_opp = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                opp_pattern = std::max(opp_pattern, detail::pattern_score(ls_opp));
-                opp_gapped = std::max(opp_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], opponent));
-            }
-            if (opp_pattern >= 200'000 || opp_gapped >= 60'000) {
-                int urgent_block = 350'000; // higher than generic block to preempt strong fours
-                if (urgent_block > best_score) {
-                    best_score = urgent_block;
-                    best_move = {x, y};
-                }
-                continue;
-            }
 
             int score = evaluate_position(x, y, me, opponent);
             if (score > best_score) {

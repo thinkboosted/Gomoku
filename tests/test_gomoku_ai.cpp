@@ -110,6 +110,41 @@ static void test_defensive_forced_win_block() {
     assert(p.x == 4 && p.y == 4 && "Should preempt opponent 2-ply forced win starter");
 }
 
+static void test_prefer_double_threat_attack() {
+    GomokuAI ai;
+    ai.init(10);
+
+    // Move at (4,4) creates two open threes (horizontal and vertical).
+    place(ai, {{2,4},{3,4}}, 1);          // horizontal chain
+    place(ai, {{4,2},{4,3}}, 1);          // vertical chain
+
+    // Distractor stones near center to tempt proximity-only moves.
+    place(ai, {{5,5},{6,6}}, 1);
+    place(ai, {{6,4}}, 2); // mild block on the right to avoid easy win
+
+    Point p = ai.find_best_move();
+    assert(p.x == 4 && p.y == 4 && "Should choose the fork creating double open threes");
+}
+
+static void test_prefer_open_four_over_defense() {
+    GomokuAI ai;
+    ai.init(10);
+
+    // We have an open three horizontally at y=5: ends (0,5) and (4,5) are open.
+    place(ai, {{1,5},{2,5},{3,5}}, 1);
+
+    // Opponent also has an open three horizontally at y=1: ends (0,1) and (4,1) are open.
+    place(ai, {{1,1},{2,1},{3,1}}, 2);
+
+    // Best play is to create an open four (immediate winning threat), not to block their open three.
+    Point p = ai.find_best_move();
+    bool makes_open_four = (p.x == 4 && p.y == 5);
+    if (!makes_open_four) {
+        std::cerr << "Expected (4,5) but got (" << p.x << "," << p.y << ")\n";
+    }
+    assert(makes_open_four && "Should prefer creating an open four over defending an open three");
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
@@ -119,6 +154,8 @@ int main() {
     test_block_open_three_over_filler();
     test_block_open_or_hidden_four();
     test_defensive_forced_win_block();
+    test_prefer_double_threat_attack();
+    test_prefer_open_four_over_defense();
     std::cout << "All tests passed\n";
     return 0;
 }

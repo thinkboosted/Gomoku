@@ -4,6 +4,7 @@
 
 - **Gagner immédiatement** : si un coup fait 5 alignés, on le joue.
 - **Bloquer immédiatement** : si l’adversaire peut faire 5, on bloque.
+- **Bloquer les 4 ouverts / menaces éclatées fortes** : si un coup empêche une 4 ouverte adverse (ou `XX.XX`), on le prend avant la heuristique.
 - **Fenêtre restreinte** : on ne cherche que dans une bande de 2 autour des pierres déjà posées pour éviter les coups hors-jeu.
 - **Menace forcée courte** : on cherche un coup qui garantit une victoire au tour suivant, même après la meilleure réponse adverse (threat search 2-plis local).
 
@@ -32,6 +33,7 @@ best_score = -inf; best_move = none
 for each empty cell in bounds:
 	if makes_win(me): return cell
 	if blocks_win(opponent): take it with high score
+	if blocks open_four_or_hidden_four(opponent): take it before generic heuristic
 	score = evaluate_position(cell)
 	keep best
 

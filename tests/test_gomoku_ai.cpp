@@ -79,6 +79,22 @@ static void test_block_open_three_over_filler() {
     assert((blocks_top || blocks_bottom) && "Should block opponent open three instead of a neutral move");
 }
 
+static void test_block_open_or_hidden_four() {
+    GomokuAI ai;
+    ai.init(10);
+
+    // Opponent has an open four horizontally at y=5 (ends at x=2 and x=7 are open).
+    place(ai, {{3,5},{4,5},{5,5},{6,5}}, 2);
+
+    // Our own stones that could tempt a neutral/central move.
+    place(ai, {{1,1},{1,2},{2,2}}, 1);
+
+    Point p = ai.find_best_move();
+    bool block_left = (p.x == 2 && p.y == 5);
+    bool block_right = (p.x == 7 && p.y == 5);
+    assert((block_left || block_right) && "Must block opponent open/hidden fours before other plays");
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
@@ -86,6 +102,7 @@ int main() {
     test_avoid_weak_closed_four();
     test_avoid_neutral_filler();
     test_block_open_three_over_filler();
+    test_block_open_or_hidden_four();
     std::cout << "All tests passed\n";
     return 0;
 }

@@ -399,6 +399,7 @@ Point GomokuAI::find_best_move() {
     // Player IDs are fixed by protocol: we are 1, opponent is 2.
     const int me = 1;
     const int opponent = 2;
+    static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
 
     int margin = 2;
     detail::Bounds b = detail::compute_bounds(board, margin);
@@ -418,6 +419,23 @@ Point GomokuAI::find_best_move() {
                 int block_score = 300'000; // ensure blocks beat heuristic plays
                 if (block_score > best_score) {
                     best_score = block_score;
+                    best_move = {x, y};
+                }
+                continue;
+            }
+
+            // Priority 3: urgent block of opponent open/hidden fours (before generic heuristics).
+            int opp_pattern = 0;
+            int opp_gapped = 0;
+            for (auto& d : dirs) {
+                detail::LineStats ls_opp = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
+                opp_pattern = std::max(opp_pattern, detail::pattern_score(ls_opp));
+                opp_gapped = std::max(opp_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], opponent));
+            }
+            if (opp_pattern >= 200'000 || opp_gapped >= 60'000) {
+                int urgent_block = 350'000; // higher than generic block to preempt strong fours
+                if (urgent_block > best_score) {
+                    best_score = urgent_block;
                     best_move = {x, y};
                 }
                 continue;

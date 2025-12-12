@@ -231,6 +231,39 @@ int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y
     return best;
 }
 
+// Encourage distant, open-ended pairings like X000.X that keep both ends flexible and can mislead opponents.
+int spaced_extension_bonus(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
+    int best = 0;
+
+    auto scan_dir = [&](int step_dir) {
+        for (int gap = 3; gap <= 4; ++gap) { // 3 or 4 steps away: X00X or X000X patterns
+            int nx = x + step_dir * gap * dx;
+            int ny = y + step_dir * gap * dy;
+            if (!is_inside(board, nx, ny)) continue;
+            if (board[nx][ny] != player) continue;
+
+            bool clear = true;
+            for (int i = 1; i < gap; ++i) {
+                int cx = x + step_dir * i * dx;
+                int cy = y + step_dir * i * dy;
+                if (!is_inside(board, cx, cy) || board[cx][cy] != 0) { clear = false; break; }
+            }
+            if (!clear) continue;
+
+            bool open_far = is_inside(board, nx + step_dir * dx, ny + step_dir * dy) && board[nx + step_dir * dx][ny + step_dir * dy] == 0;
+            bool open_near = is_inside(board, x - step_dir * dx, y - step_dir * dy) && board[x - step_dir * dx][y - step_dir * dy] == 0;
+            if (!(open_far || open_near)) continue;
+
+            int base = (gap == 3 ? 1'200 : 1'500);
+            best = std::max(best, base);
+        }
+    };
+
+    scan_dir(1);
+    scan_dir(-1);
+    return best;
+}
+
 // Find a move that guarantees an immediate win on the next turn, regardless of opponent reply (shallow threat search).
 Point threat_search_forced_win(std::vector<std::vector<int>>& board, const Bounds& bounds, int margin, int me, int opponent, int width, int height) {
     auto would_win = [&](int px, int py, int player) {
@@ -314,10 +347,18 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     };
 
     // Attack: how strong we become if we play here.
+    int threat_dirs = 0; // count directions that create an immediate threat (open three or better)
     for (int i = 0; i < 4; ++i) {
         auto& d = dirs[i];
         detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
         int s = detail::pattern_score(ls) + detail::gapped_threat_score(board, x, y, d[0], d[1], me);
+        int spaced = detail::spaced_extension_bonus(board, x, y, d[0], d[1], me);
+        s += spaced;
+
+        // Track how many directions yield at least an open three / split three (for double-threat bonus).
+        if (detail::pattern_score(ls) >= 15'000 || detail::gapped_threat_score(board, x, y, d[0], d[1], me) >= 2'500) {
+            threat_dirs++;
+        }
 
         // If playing here only makes a closed four whose blocked side is an adjacent opponent stone,
         // downweight it (opponent already sits on the only exit). Prefer other openings unless forked.
@@ -328,7 +369,7 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
                 s = std::min(s, 8'000); // favor autre ouverture sauf si compensé par un fork
             }
         }
-        if (!meaningful_attack && (detail::pattern_score(ls) >= 2'000 || detail::gapped_threat_score(board, x, y, d[0], d[1], me) > 0)) {
+        if (!meaningful_attack && (detail::pattern_score(ls) >= 2'000 || detail::gapped_threat_score(board, x, y, d[0], d[1], me) > 0 || spaced > 0)) {
             meaningful_attack = true;
         }
         dir_attack_scores[i] = s;
@@ -353,6 +394,13 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     std::sort(tmp.begin(), tmp.end(), std::greater<int>());
     int fork_bonus = (tmp[0] + tmp[1]) / 3; // lighter than raw sum to avoid overpowering
     int extra_score = fork_bonus;
+
+    // Bonus for creating multiple immediate threats (double open three / split threat).
+    if (threat_dirs >= 2) {
+        extra_score += 40'000;
+    } else if (threat_dirs == 1) {
+        extra_score += 8'000;
+    }
 
     // Proximity: avoid isolated plays; prefer to stay within two cells of any stone.
     int neighbor_score = 0;

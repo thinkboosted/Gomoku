@@ -13,6 +13,7 @@
 
 - **Patterns ouverts/fermés** : scoring fort pour 4 ouverts, 4 fermés, 3 ouverts/fermés, 2 ouverts/fermés (attaque et défense).
 - **Menaces éclatées** : détection de `XX.XX` ou `XX.X` avec au moins une extrémité ouverte (menace cachée, non évidente).
+- **Extension espacée** : bonus léger pour jouer à 3–4 cases d'une pierre amie (`X000.X`) si les cases intermédiaires sont libres et au moins une extrémité reste ouverte, afin de garder des options et brouiller l'IA adverse.
 - **Fork / double menace** : bonus si le coup est fort dans deux directions.
 - **Proximité** : bonus si le coup est proche de pierres existantes (rayon 2).
 - **Centralité** : bonus si le coup est proche du centre.

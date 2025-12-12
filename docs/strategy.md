@@ -8,15 +8,16 @@
 - **Fenêtre restreinte** : on ne cherche que dans une bande de 2 autour des pierres déjà posées (3 si le plateau > 12) pour éviter les coups hors-jeu.
 - **Menace forcée courte** : on cherche un coup qui garantit une victoire au tour suivant, même après la meilleure réponse adverse (threat search 2-plis local).
 - **Menace forcée adverse** : si l’adversaire a un 2-plis forcé, on joue sur son coup de départ pour casser la séquence.
+- **Garde-fou tactique** : on évite (ou pénalise fortement) un coup qui laisse un gain immédiat à l’adversaire au tour suivant.
 
 ## Heuristique d’évaluation
 
 - **Patterns ouverts/fermés** : scoring fort pour 4 ouverts, 4 fermés, 3 ouverts/fermés, 2 ouverts/fermés (attaque et défense).
 - **Menaces éclatées** : détection de `XX.XX` ou `XX.X` avec au moins une extrémité ouverte (menace cachée, non évidente).
-- **Extension espacée** : bonus léger pour jouer à 3–4 cases d'une pierre amie (`X000.X`) si les cases intermédiaires sont libres et au moins une extrémité reste ouverte, afin de garder des options et brouiller l'IA adverse.
+- **Extension espacée** : bonus léger pour jouer à 3 cases d'une pierre amie (`X00X`) si les cases intermédiaires sont libres et au moins une extrémité reste ouverte.
 - **Fork / double menace** : bonus si le coup est fort dans deux directions.
-- **Proximité** : bonus si le coup est proche de pierres existantes (rayon 2).
-- **Centralité** : bonus si le coup est proche du centre.
+- **Proximité** : bonus si le coup est proche de pierres existantes (rayon 2), mais plafonné pour éviter les coups “dans le tas”.
+- **Centralité** : bonus près du centre surtout en début de partie (poids réduit quand le plateau se remplit).
 
 ## Pseudocode de décision
 

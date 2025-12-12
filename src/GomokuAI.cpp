@@ -1,12 +1,9 @@
 #include "GomokuAI.hpp"
-#include <cstdlib>
-#include <ctime>
 #include <algorithm>
 #include <cmath>
 #include <array>
 
 GomokuAI::GomokuAI() : width(20), height(20) {
-    srand(static_cast<unsigned>(time(NULL)));
 }
 
 void GomokuAI::init(int size) {
@@ -93,6 +90,14 @@ bool board_is_empty(const std::vector<std::vector<int>>& board) {
     return true;
 }
 
+int count_stones(const std::vector<std::vector<int>>& board) {
+    int stones = 0;
+    for (const auto& row : board) {
+        for (int cell : row) stones += (cell != 0);
+    }
+    return stones;
+}
+
 // Compute a rectangular window covering all stones, expanded by `margin`.
 Bounds compute_bounds(const std::vector<std::vector<int>>& board, int margin) {
     int w = board.size();
@@ -119,6 +124,15 @@ Bounds compute_bounds(const std::vector<std::vector<int>>& board, int margin) {
         b.end_y   = std::min(h - 1, max_y + margin);
     }
     return b;
+}
+
+Bounds expand_bounds(const Bounds& b, int expand, int width, int height) {
+    Bounds out;
+    out.start_x = std::max(0, b.start_x - expand);
+    out.end_x = std::min(width - 1, b.end_x + expand);
+    out.start_y = std::max(0, b.start_y - expand);
+    out.end_y = std::min(height - 1, b.end_y + expand);
+    return out;
 }
 
 // Collect how many aligned stones we would have by playing (x,y) and whether each end stays open.
@@ -236,7 +250,8 @@ int spaced_extension_bonus(const std::vector<std::vector<int>>& board, int x, in
     int best = 0;
 
     auto scan_dir = [&](int step_dir) {
-        for (int gap = 3; gap <= 4; ++gap) { // 3 or 4 steps away: X00X or X000X patterns
+        // Keep this coherent with our typical search window (margin 2/3): gap=4 rarely falls inside bounds.
+        for (int gap = 3; gap <= 3; ++gap) { // 3 steps away: X00X
             int nx = x + step_dir * gap * dx;
             int ny = y + step_dir * gap * dy;
             if (!is_inside(board, nx, ny)) continue;
@@ -256,7 +271,7 @@ int spaced_extension_bonus(const std::vector<std::vector<int>>& board, int x, in
             // Keep the far end open to really form X000.X; otherwise it's just a buried gap inside our own chain.
             if (!open_far) continue;
 
-            int base = (gap == 3 ? 1'200 : 1'500);
+            int base = 1'200;
             if (open_near) base += 200; // extra value when both ends stay open
             best = std::max(best, base);
         }
@@ -419,13 +434,18 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
             }
         }
     }
-    extra_score += neighbor_score * 15;
+    neighbor_score = std::min(neighbor_score, 12);
+    extra_score += neighbor_score * 10;
 
     // Centrality heuristic: Playing near the center offers more growth potential in all directions.
+    // Scale down this effect as the game progresses.
+    int stones = detail::count_stones(board);
     int cx = width / 2;
     int cy = height / 2;
     int dist = std::abs(x - cx) + std::abs(y - cy);
-    extra_score += (200 - dist * 5);
+    int center_weight = (stones < 6 ? 120 : 40);
+    int center_bonus = center_weight - dist * 4;
+    if (center_bonus > 0) extra_score += center_bonus;
 
     // If the move neither creates nor blocks at least a (closed) three or gapped threat,
     // downweight soft bonuses so we avoid neutral filler moves.
@@ -456,6 +476,7 @@ Point GomokuAI::find_best_move() {
     // Use a slightly larger margin on larger boards to not miss distant threats.
     int margin = (width > 12 ? 3 : 2);
     detail::Bounds b = detail::compute_bounds(board, margin);
+    detail::Bounds guard_b = detail::expand_bounds(b, 1, width, height);
 
     // Mandatory tactics first: never let a deeper heuristic/threat-search override these.
     // 1) Win now
@@ -518,6 +539,22 @@ Point GomokuAI::find_best_move() {
             if (board[x][y] != 0) continue;
 
             int score = evaluate_position(x, y, me, opponent);
+
+            // Tactical guard: avoid playing a move that allows an immediate opponent win.
+            // This also helps when bounds are tight and a winning reply is just outside b.
+            board[x][y] = me;
+            bool gives_immediate_win = false;
+            for (int ox = guard_b.start_x; ox <= guard_b.end_x && !gives_immediate_win; ++ox) {
+                for (int oy = guard_b.start_y; oy <= guard_b.end_y && !gives_immediate_win; ++oy) {
+                    if (board[ox][oy] != 0) continue;
+                    if (detail::evaluate_line_local(board, ox, oy, opponent) >= 5) {
+                        gives_immediate_win = true;
+                    }
+                }
+            }
+            board[x][y] = 0;
+            if (gives_immediate_win) score -= 500'000;
+
             if (score > best_score) {
                 best_score = score;
                 best_move = {x, y};

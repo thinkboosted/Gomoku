@@ -9,6 +9,7 @@
 - **Menace forcée courte** : on cherche un coup qui garantit une victoire au tour suivant, même après la meilleure réponse adverse (threat search 2-plis local).
 - **Menace forcée adverse** : si l’adversaire a un 2-plis forcé, on joue sur son coup de départ pour casser la séquence.
 - **Garde-fou tactique** : on évite (ou pénalise fortement) un coup qui laisse un gain immédiat à l’adversaire au tour suivant.
+- **Recherche (alpha-bêta)** : si aucune tactique immédiate ne décide, on lance une recherche `negamax` + alpha-bêta en approfondissement itératif (budget temps), avec génération de coups top-K et table de transposition (Zobrist).
 
 ## Heuristique d’évaluation
 

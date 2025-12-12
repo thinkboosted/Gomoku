@@ -2,18 +2,50 @@
 #include <algorithm>
 #include <cmath>
 #include <array>
+#include <chrono>
+#include <unordered_map>
+#include <cstdint>
 
 GomokuAI::GomokuAI() : width(20), height(20) {
+}
+
+namespace {
+
+static uint64_t splitmix64(uint64_t& x) {
+    uint64_t z = (x += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+} // namespace
+
+void GomokuAI::init_zobrist() {
+    zobrist.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 3ULL, 0ULL);
+    uint64_t seed = 0xC0FFEE123456789ULL ^ static_cast<uint64_t>(width * 1315423911u + height * 2654435761u);
+    for (size_t i = 0; i < zobrist.size(); ++i) {
+        zobrist[i] = splitmix64(seed);
+    }
+}
+
+uint64_t GomokuAI::zobrist_at(int x, int y, int player) const {
+    return zobrist[(static_cast<size_t>(x) * static_cast<size_t>(height) + static_cast<size_t>(y)) * 3ULL + static_cast<size_t>(player)];
 }
 
 void GomokuAI::init(int size) {
     width = size;
     height = size;
     board.assign(width, std::vector<int>(height, 0));
+    init_zobrist();
+    hash_key = 0;
 }
 
 void GomokuAI::update_board(int x, int y, int player) {
     if (x >= 0 && x < width && y >= 0 && y < height) {
+        int prev = board[x][y];
+        if (prev == player) return;
+        if (prev >= 0 && prev <= 2) hash_key ^= zobrist_at(x, y, prev);
+        if (player >= 0 && player <= 2) hash_key ^= zobrist_at(x, y, player);
         board[x][y] = player;
     }
 }
@@ -77,6 +109,12 @@ struct Bounds {
     int end_y;
 };
 
+struct Move {
+    int x;
+    int y;
+    int score;
+};
+
 // Check if coordinates are inside board limits.
 bool is_inside(const std::vector<std::vector<int>>& board, int x, int y) {
     return x >= 0 && y >= 0 && x < static_cast<int>(board.size()) && y < static_cast<int>(board[0].size());
@@ -134,6 +172,32 @@ Bounds expand_bounds(const Bounds& b, int expand, int width, int height) {
     out.end_y = std::min(height - 1, b.end_y + expand);
     return out;
 }
+
+// Side-to-move salt for TT keys (avoid collisions between same position with different side).
+constexpr uint64_t TT_SIDE_P1 = 0xA0761D6478BD642FULL;
+constexpr uint64_t TT_SIDE_P2 = 0xE7037ED1A0B428DBULL;
+
+struct TTEntry {
+    int depth;
+    int value;
+    int best_x;
+    int best_y;
+};
+
+} // namespace detail
+
+namespace {
+
+constexpr int INF = 1'000'000'000;
+constexpr int WIN_SCORE = 900'000'000;
+
+inline uint64_t tt_key(uint64_t base, int player_to_move) {
+    return base ^ (player_to_move == 1 ? detail::TT_SIDE_P1 : detail::TT_SIDE_P2);
+}
+
+} // namespace
+
+namespace detail {
 
 // Collect how many aligned stones we would have by playing (x,y) and whether each end stays open.
 LineStats get_line_stats(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
@@ -271,8 +335,8 @@ int spaced_extension_bonus(const std::vector<std::vector<int>>& board, int x, in
             // Keep the far end open to really form X000.X; otherwise it's just a buried gap inside our own chain.
             if (!open_far) continue;
 
-            int base = 1'200;
-            if (open_near) base += 200; // extra value when both ends stay open
+            int base = 250;
+            if (open_near) base += 50; // extra value when both ends stay open
             best = std::max(best, base);
         }
     };
@@ -338,6 +402,215 @@ Point threat_search_forced_win(std::vector<std::vector<int>>& board, const Bound
 }
 
 } // namespace detail
+
+namespace {
+
+static std::vector<detail::Move> generate_candidates(
+    GomokuAI& ai,
+    const detail::Bounds& bounds,
+    int player,
+    int opponent,
+    int max_moves)
+{
+    std::vector<detail::Move> moves;
+    moves.reserve(static_cast<size_t>(max_moves) * 2ULL);
+
+    for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
+        for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
+            if (ai.board[x][y] != 0) continue;
+
+            int s = ai.evaluate_position(x, y, player, opponent);
+            int self_len = detail::evaluate_line_local(ai.board, x, y, player);
+            int opp_len = detail::evaluate_line_local(ai.board, x, y, opponent);
+            if (self_len >= 5) s += WIN_SCORE;
+            if (opp_len >= 5) s += WIN_SCORE / 2; // urgent block
+            moves.push_back({x, y, s});
+        }
+    }
+
+    std::sort(moves.begin(), moves.end(), [](const detail::Move& a, const detail::Move& b) {
+        return a.score > b.score;
+    });
+
+    if (static_cast<int>(moves.size()) > max_moves) moves.resize(static_cast<size_t>(max_moves));
+    return moves;
+}
+
+static int evaluate_state_fixed(
+    GomokuAI& ai,
+    const detail::Bounds& bounds,
+    int root_me,
+    int root_opp)
+{
+    // Cheap evaluation: best move potential for player minus best move potential for opponent.
+    // Keep it small and stable for alpha-beta.
+    auto self_moves = generate_candidates(ai, bounds, root_me, root_opp, 10);
+    auto opp_moves = generate_candidates(ai, bounds, root_opp, root_me, 10);
+
+    int best_self = self_moves.empty() ? 0 : self_moves.front().score;
+    int best_opp = opp_moves.empty() ? 0 : opp_moves.front().score;
+
+    // If root opponent has an immediate win threat, reflect it strongly.
+    for (const auto& m : opp_moves) {
+        if (detail::evaluate_line_local(ai.board, m.x, m.y, root_opp) >= 5) {
+            return -WIN_SCORE / 2;
+        }
+    }
+
+    return best_self - (best_opp * 9 / 10);
+}
+
+static int negamax(
+    GomokuAI& ai,
+    const detail::Bounds& bounds,
+    int depth,
+    int alpha,
+    int beta,
+    int player_to_move,
+    int opponent,
+    int root_me,
+    int root_opp,
+    std::unordered_map<uint64_t, detail::TTEntry>& tt,
+    const std::chrono::steady_clock::time_point& deadline,
+    bool& time_up)
+{
+    if (time_up || std::chrono::steady_clock::now() >= deadline) {
+        time_up = true;
+        return 0;
+    }
+
+    if (depth == 0) {
+        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp);
+        int color = (player_to_move == root_me) ? 1 : -1;
+        return color * eval;
+    }
+
+    uint64_t key = tt_key(ai.get_hash_key(), player_to_move);
+    auto it = tt.find(key);
+    if (it != tt.end() && it->second.depth >= depth) {
+        return it->second.value;
+    }
+
+    int best_value = -INF;
+    int best_x = -1;
+    int best_y = -1;
+
+    auto moves = generate_candidates(ai, bounds, player_to_move, opponent, 12);
+    if (moves.empty()) {
+        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp);
+        int color = (player_to_move == root_me) ? 1 : -1;
+        return color * eval;
+    }
+
+    for (const auto& mv : moves) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            time_up = true;
+            break;
+        }
+
+        // Apply move
+        ai.update_board(mv.x, mv.y, player_to_move);
+
+        int value;
+        if (detail::evaluate_line_local(ai.board, mv.x, mv.y, player_to_move) >= 5) {
+            value = WIN_SCORE - (5 - depth);
+        } else {
+            value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, player_to_move, root_me, root_opp, tt, deadline, time_up);
+        }
+
+        // Undo
+        ai.update_board(mv.x, mv.y, 0);
+        if (time_up) break;
+
+        if (value > best_value) {
+            best_value = value;
+            best_x = mv.x;
+            best_y = mv.y;
+        }
+        alpha = std::max(alpha, value);
+        if (alpha >= beta) break;
+    }
+
+    if (!time_up && best_x != -1) {
+        tt[key] = detail::TTEntry{depth, best_value, best_x, best_y};
+    }
+    return best_value;
+}
+
+static Point search_best_move(
+    GomokuAI& ai,
+    const detail::Bounds& base_bounds,
+    int me,
+    int opponent,
+    int time_limit_ms)
+{
+    detail::Bounds bounds = detail::expand_bounds(base_bounds, 1, ai.width, ai.height);
+    auto start = std::chrono::steady_clock::now();
+    auto deadline = start + std::chrono::milliseconds(time_limit_ms);
+
+    std::unordered_map<uint64_t, detail::TTEntry> tt;
+    tt.reserve(200'000);
+
+    auto root_moves = generate_candidates(ai, bounds, me, opponent, 24);
+    if (root_moves.empty()) return {-1, -1};
+
+    Point best = {root_moves.front().x, root_moves.front().y};
+    int best_val = -INF;
+
+    bool time_up = false;
+    for (int depth = 1; depth <= 5; ++depth) {
+        if (std::chrono::steady_clock::now() >= deadline) break;
+
+        int alpha = -INF;
+        int beta = INF;
+        int local_best_val = -INF;
+        Point local_best = best;
+
+        // Try principal variation move first (from previous iteration)
+        std::stable_sort(root_moves.begin(), root_moves.end(), [&](const detail::Move& a, const detail::Move& b) {
+            if (a.x == best.x && a.y == best.y) return true;
+            if (b.x == best.x && b.y == best.y) return false;
+            return a.score > b.score;
+        });
+
+        for (const auto& mv : root_moves) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                time_up = true;
+                break;
+            }
+
+            ai.update_board(mv.x, mv.y, me);
+
+            int value;
+            if (detail::evaluate_line_local(ai.board, mv.x, mv.y, me) >= 5) {
+                value = WIN_SCORE;
+            } else {
+                value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, me, me, opponent, tt, deadline, time_up);
+            }
+
+            ai.update_board(mv.x, mv.y, 0);
+            if (time_up) break;
+
+            if (value > local_best_val) {
+                local_best_val = value;
+                local_best = {mv.x, mv.y};
+            }
+            alpha = std::max(alpha, value);
+        }
+
+        if (!time_up) {
+            best = local_best;
+            best_val = local_best_val;
+        } else {
+            break;
+        }
+    }
+
+    (void)best_val;
+    return best;
+}
+
+} // namespace
 
 int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     // Heuristic mix: attack + defense + fork bonus + proximity + center bias.
@@ -532,6 +805,14 @@ Point GomokuAI::find_best_move() {
     Point opp_forced = detail::threat_search_forced_win(board, b, margin, opponent, me, width, height);
     if (opp_forced.x != -1 && board[opp_forced.x][opp_forced.y] == 0) {
         return opp_forced;
+    }
+
+    // Main improvement: iterative-deepening alpha-beta search (time-bounded).
+    // Keep budget conservative to avoid timeouts on dense boards.
+    if (detail::count_stones(board) >= 10) {
+        constexpr int SEARCH_TIME_MS = 1200;
+        Point p = search_best_move(*this, b, me, opponent, SEARCH_TIME_MS);
+        if (p.x != -1) return p;
     }
 
     for (int x = b.start_x; x <= b.end_x; ++x) {

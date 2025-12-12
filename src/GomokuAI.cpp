@@ -354,12 +354,14 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     for (int i = 0; i < 4; ++i) {
         auto& d = dirs[i];
         detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
-        int s = detail::pattern_score(ls) + detail::gapped_threat_score(board, x, y, d[0], d[1], me);
+        int pattern = detail::pattern_score(ls);
+        int gapped = detail::gapped_threat_score(board, x, y, d[0], d[1], me);
         int spaced = detail::spaced_extension_bonus(board, x, y, d[0], d[1], me);
-        s += spaced;
+
+        int s = pattern + gapped + spaced;
 
         // Track how many directions yield at least an open three / split three (for double-threat bonus).
-        if (detail::pattern_score(ls) >= 15'000 || detail::gapped_threat_score(board, x, y, d[0], d[1], me) >= 2'500) {
+        if (pattern >= 15'000 || gapped >= 60'000) {
             threat_dirs++;
         }
 
@@ -372,7 +374,7 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
                 s = std::min(s, 8'000); // favor autre ouverture sauf si compensé par un fork
             }
         }
-        if (!meaningful_attack && (detail::pattern_score(ls) >= 2'000 || detail::gapped_threat_score(board, x, y, d[0], d[1], me) > 0 || spaced > 0)) {
+        if (!meaningful_attack && (pattern >= 2'000 || gapped > 0 || spaced > 0)) {
             meaningful_attack = true;
         }
         dir_attack_scores[i] = s;

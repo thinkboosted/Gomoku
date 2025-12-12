@@ -252,9 +252,12 @@ int spaced_extension_bonus(const std::vector<std::vector<int>>& board, int x, in
 
             bool open_far = is_inside(board, nx + step_dir * dx, ny + step_dir * dy) && board[nx + step_dir * dx][ny + step_dir * dy] == 0;
             bool open_near = is_inside(board, x - step_dir * dx, y - step_dir * dy) && board[x - step_dir * dx][y - step_dir * dy] == 0;
-            if (!(open_far || open_near)) continue;
+
+            // Keep the far end open to really form X000.X; otherwise it's just a buried gap inside our own chain.
+            if (!open_far) continue;
 
             int base = (gap == 3 ? 1'200 : 1'500);
+            if (open_near) base += 200; // extra value when both ends stay open
             best = std::max(best, base);
         }
     };

@@ -143,6 +143,85 @@ static void test_prefer_open_four_over_defense() {
     assert((makes_open_four_left || makes_open_four_right) && "Should prefer creating an open four over defending an open three");
 }
 
+// 1. Strict Adjacent Block for Open Four threat (formerly ..000..)
+static void test_strict_adjacent_block_open_three() {
+    GomokuAI ai;
+    ai.init(20);
+    // Opponent has Open Three ..000..
+    place(ai, {{5,5}, {6,5}, {7,5}}, 2); 
+
+    Point p = ai.find_best_move();
+    bool strict_block = (p.x == 4 && p.y == 5) || (p.x == 8 && p.y == 5);
+    assert(strict_block && "Must block Open Three adjacently to prevent Open Four");
+}
+
+// 2. Strict Adjacent Block for Blocked Three (formerly X000..)
+static void test_strict_adjacent_block_blocked_three() {
+    GomokuAI ai;
+    ai.init(20);
+    // Opponent has Blocked Three X000..
+    place(ai, {{4,5}}, 1); 
+    place(ai, {{5,5}, {6,5}, {7,5}}, 2);
+
+    Point p = ai.find_best_move();
+    assert(p.x == 8 && p.y == 5 && "Must block Blocked Three adjacently");
+}
+
+// 3. Block Fork 3-3 (Double Threat)
+static void test_block_fork_3_3() {
+    GomokuAI ai;
+    ai.init(20);
+    // Opponent setups a fork at 10,10.
+    place(ai, {{10,8}, {10,9}}, 2);
+    place(ai, {{11,10}, {12,10}}, 2);
+    
+    // Minor distraction
+    place(ai, {{2,2}, {2,3}}, 2);
+
+    Point p = ai.find_best_move();
+    assert(p.x == 10 && p.y == 10 && "Must block the intersection of a Fork 3-3");
+}
+
+// 4. Block Diagonal Broken Three
+static void test_block_diagonal_broken_three() {
+    GomokuAI ai;
+    ai.init(20);
+    // Diagonal Broken Three: O . O O
+    place(ai, {{5,5}, {7,7}, {8,8}}, 2);
+
+    Point p = ai.find_best_move();
+    assert(p.x == 6 && p.y == 6 && "Must block the gap in a Diagonal Broken Three");
+}
+
+// 5. Create Open Four (Attack Priority)
+static void test_create_open_four_priority() {
+    GomokuAI ai;
+    ai.init(20);
+    // I have Open Three: . X X X .
+    place(ai, {{5,5}, {6,5}, {7,5}}, 1);
+    
+    // Opponent has Open Three elsewhere: . O O O .
+    place(ai, {{5,10}, {6,10}, {7,10}}, 2);
+
+    Point p = ai.find_best_move();
+    bool attack = (p.x == 4 && p.y == 5) || (p.x == 8 && p.y == 5);
+    assert(attack && "Must prioritize creating Open Four over blocking Open Three");
+}
+
+// 6. Block Open Four (Defense Priority)
+static void test_block_open_four_priority() {
+    GomokuAI ai;
+    ai.init(20);
+    // Opponent has Broken Four (gap) that leads to 5.
+    place(ai, {{5,5}, {6,5}, {8,5}, {9,5}}, 2);
+    
+    // I have Open Three.
+    place(ai, {{5,10}, {6,10}, {7,10}}, 1);
+
+    Point p = ai.find_best_move();
+    assert(p.x == 7 && p.y == 5 && "Must block immediate Win threat over creating Open Four");
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
@@ -154,6 +233,14 @@ int main() {
     test_defensive_forced_win_block();
     test_prefer_double_threat_attack();
     test_prefer_open_four_over_defense();
+    
+    test_strict_adjacent_block_open_three();
+    test_strict_adjacent_block_blocked_three();
+    test_block_fork_3_3();
+    test_block_diagonal_broken_three();
+    test_create_open_four_priority();
+    test_block_open_four_priority();
+
     std::cout << "All tests passed\n";
     return 0;
 }

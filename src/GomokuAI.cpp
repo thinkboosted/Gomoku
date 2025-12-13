@@ -669,16 +669,27 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     }
 
     // Defense: how much danger we neutralize from the opponent by occupying this point.
+    int opp_threat_dirs = 0;
     for (auto& d : dirs) {
         detail::LineStats ls_opp = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
         int p = detail::pattern_score(ls_opp);
         int g = detail::gapped_threat_score(board, x, y, d[0], d[1], opponent);
+        
+        // Count directions where opponent has at least an Open Three or similar strong threat
+        if (p >= 15'000 || g >= 60'000) {
+            opp_threat_dirs++;
+        }
+
         // A blocking move both prevents their pattern and often creates ours; keep weight high.
         defense_total += p * 9 / 10;
         defense_total += g * 8 / 10;
         if (!meaningful_defense && (p >= 2'000 || g > 0)) {
             meaningful_defense = true;
         }
+    }
+    // Block Opponent Fork: If opponent has multiple strong threats here, blocking is mandatory-like.
+    if (opp_threat_dirs >= 2) {
+        defense_total += 50'000;
     }
 
     // Threat multiplicity: bonus when the move is strong in two directions (fork potential).
@@ -752,84 +763,92 @@ Point GomokuAI::find_best_move() {
     detail::Bounds guard_b = detail::expand_bounds(b, 1, width, height);
 
     // Mandatory tactics first: never let a deeper heuristic/threat-search override these.
-        // 1) Win now
-        for (int x = b.start_x; x <= b.end_x; ++x) {
-            for (int y = b.start_y; y <= b.end_y; ++y) {
-                if (board[x][y] != 0) continue;
-                if (evaluate_line(x, y, me) >= 5) return {x, y};
-            }
-        }
-
-        // 2) Block opponent win now
-        for (int x = b.start_x; x <= b.end_x; ++x) {
-            for (int y = b.start_y; y <= b.end_y; ++y) {
-                if (board[x][y] != 0) continue;
-                if (evaluate_line(x, y, opponent) >= 5) return {x, y};
-            }
-        }
-
-        // 3) Create our own Open Four (Attack) - Win in 1 move
-        for (int x = b.start_x; x <= b.end_x; ++x) {
-            for (int y = b.start_y; y <= b.end_y; ++y) {
-                if (board[x][y] != 0) continue;
-                int my_pattern = 0;
-                for (auto& d : dirs) {
-                    detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
-                    my_pattern = std::max(my_pattern, detail::pattern_score(ls));
-                }
-                if (my_pattern >= 200'000) return {x, y};
-            }
-        }
-
-        // 4) Block opponent Open Four (Defense) - Must block or lose
-        for (int x = b.start_x; x <= b.end_x; ++x) {
-            for (int y = b.start_y; y <= b.end_y; ++y) {
-                if (board[x][y] != 0) continue;
-                int opp_pattern = 0;
-                for (auto& d : dirs) {
-                    detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                    opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
-                }
-                if (opp_pattern >= 150'000) return {x, y};
-            }
-        }
-
-        // 5) Block opponent Hidden Four (Defense)
-        for (int x = b.start_x; x <= b.end_x; ++x) {
-            for (int y = b.start_y; y <= b.end_y; ++y) {
-                if (board[x][y] != 0) continue;
-                int opp_gapped = 0;
-                for (auto& d : dirs) {
-                    opp_gapped = std::max(opp_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], opponent));
-                }
-                if (opp_gapped >= 60'000) return {x, y};
-            }
-        }
-
-        // 6) Create our own Hidden Four (Attack)
-        for (int x = b.start_x; x <= b.end_x; ++x) {
-            for (int y = b.start_y; y <= b.end_y; ++y) {
-                if (board[x][y] != 0) continue;
-                int my_gapped = 0;
-                for (auto& d : dirs) {
-                    my_gapped = std::max(my_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], me));
-                }
-                if (my_gapped >= 60'000) return {x, y};
-            }
-        }
-
-            // 7) Block opponent Closed Four or Open Three (Defense)
-            for (int x = b.start_x; x <= b.end_x; ++x) {
-                for (int y = b.start_y; y <= b.end_y; ++y) {
-                    if (board[x][y] != 0) continue;
-                    int opp_pattern = 0;
-                    for (auto& d : dirs) {
-                        detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                        opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
+                // 1) Win now
+                for (int x = b.start_x; x <= b.end_x; ++x) {
+                    for (int y = b.start_y; y <= b.end_y; ++y) {
+                        if (board[x][y] != 0) continue;
+                        if (evaluate_line(x, y, me) >= 5) return {x, y};
                     }
-                    if (opp_pattern >= 10'000) return {x, y};
                 }
-            }    // Threat search (2-ply) after mandatory defense.
+            
+                // 2) Block opponent win now
+                for (int x = b.start_x; x <= b.end_x; ++x) {
+                    for (int y = b.start_y; y <= b.end_y; ++y) {
+                        if (board[x][y] != 0) continue;
+                        if (evaluate_line(x, y, opponent) >= 5) return {x, y};
+                    }
+                }
+            
+                // 3) Create our own Open Four (Attack) - Win in 1 move
+                for (int x = b.start_x; x <= b.end_x; ++x) {
+                    for (int y = b.start_y; y <= b.end_y; ++y) {
+                        if (board[x][y] != 0) continue;
+                        int my_pattern = 0;
+                        for (auto& d : dirs) {
+                            detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
+                            my_pattern = std::max(my_pattern, detail::pattern_score(ls));
+                        }
+                        if (my_pattern >= 200'000) return {x, y};
+                    }
+                }
+            
+                // 4) Block opponent Open Four (Defense) - Must block or lose
+                for (int x = b.start_x; x <= b.end_x; ++x) {
+                    for (int y = b.start_y; y <= b.end_y; ++y) {
+                        if (board[x][y] != 0) continue;
+                        int opp_pattern = 0;
+                        for (auto& d : dirs) {
+                            detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
+                            opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
+                        }
+                        if (opp_pattern >= 150'000) return {x, y};
+                    }
+                }
+            
+                // 5) Block opponent Hidden Four (Defense)
+                for (int x = b.start_x; x <= b.end_x; ++x) {
+                    for (int y = b.start_y; y <= b.end_y; ++y) {
+                        if (board[x][y] != 0) continue;
+                        int opp_gapped = 0;
+                        for (auto& d : dirs) {
+                            opp_gapped = std::max(opp_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], opponent));
+                        }
+                        if (opp_gapped >= 60'000) return {x, y};
+                    }
+                }
+            
+                // 6) Create our own Hidden Four (Attack)
+                for (int x = b.start_x; x <= b.end_x; ++x) {
+                    for (int y = b.start_y; y <= b.end_y; ++y) {
+                        if (board[x][y] != 0) continue;
+                        int my_gapped = 0;
+                        for (auto& d : dirs) {
+                            my_gapped = std::max(my_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], me));
+                        }
+                        if (my_gapped >= 60'000) return {x, y};
+                    }
+                }
+            
+                // 7) Block opponent Fork (Double Threat) or Single Closed Four/Open Three
+                // We prioritize blocking a Fork (>=2 threats) over a single threat.
+                Point single_threat = {-1, -1};
+                for (int x = b.start_x; x <= b.end_x; ++x) {
+                    for (int y = b.start_y; y <= b.end_y; ++y) {
+                        if (board[x][y] != 0) continue;
+                        int threats = 0;
+                        for (auto& d : dirs) {
+                            detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
+                            if (detail::pattern_score(ls) >= 10'000) {
+                                threats++;
+                            }
+                        }
+                        if (threats >= 2) return {x, y}; // Fork found - Immediate block
+                        if (threats == 1 && single_threat.x == -1) {
+                            single_threat = {x, y};
+                        }
+                    }
+                }
+                if (single_threat.x != -1) return single_threat;    // Threat search (2-ply) after mandatory defense.
     Point forced = detail::threat_search_forced_win(board, b, margin, me, opponent, width, height);
     if (forced.x != -1) return forced;
 

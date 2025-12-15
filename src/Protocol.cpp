@@ -26,6 +26,10 @@ void Protocol::handle_start(std::string& cmd) {
     int size;
     ss >> temp >> size;
     if (ss.fail()) size = 20;
+    if (size < 5) {
+        send_log("ERROR", "unsupported size");
+        return;
+    }
     ai.init(size);
     std::cout << "OK" << std::endl;
 }

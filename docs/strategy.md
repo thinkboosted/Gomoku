@@ -4,16 +4,21 @@
 
 - **Gagner immédiatement** : si un coup fait 5 alignés, on le joue.
 - **Bloquer immédiatement** : si l’adversaire peut faire 5, on bloque.
-- **Fenêtre restreinte** : on ne cherche que dans une bande de 2 autour des pierres déjà posées pour éviter les coups hors-jeu.
+- **Bloquer les 4 ouverts / menaces éclatées fortes** : si un coup empêche une 4 ouverte adverse (ou `XX.XX`), on le prend avant la heuristique.
+- **Fenêtre restreinte** : on ne cherche que dans une bande de 2 autour des pierres déjà posées (3 si le plateau > 12) pour éviter les coups hors-jeu.
 - **Menace forcée courte** : on cherche un coup qui garantit une victoire au tour suivant, même après la meilleure réponse adverse (threat search 2-plis local).
+- **Menace forcée adverse** : si l’adversaire a un 2-plis forcé, on joue sur son coup de départ pour casser la séquence.
+- **Garde-fou tactique** : on évite (ou pénalise fortement) un coup qui laisse un gain immédiat à l’adversaire au tour suivant.
+- **Recherche (alpha-bêta)** : si aucune tactique immédiate ne décide, on lance une recherche `negamax` + alpha-bêta en approfondissement itératif (budget temps), avec génération de coups top-K et table de transposition (Zobrist).
 
 ## Heuristique d’évaluation
 
 - **Patterns ouverts/fermés** : scoring fort pour 4 ouverts, 4 fermés, 3 ouverts/fermés, 2 ouverts/fermés (attaque et défense).
 - **Menaces éclatées** : détection de `XX.XX` ou `XX.X` avec au moins une extrémité ouverte (menace cachée, non évidente).
+- **Extension espacée** : bonus léger pour jouer à 3 cases d'une pierre amie (`X00X`) si les cases intermédiaires sont libres et au moins une extrémité reste ouverte.
 - **Fork / double menace** : bonus si le coup est fort dans deux directions.
-- **Proximité** : bonus si le coup est proche de pierres existantes (rayon 2).
-- **Centralité** : bonus si le coup est proche du centre.
+- **Proximité** : bonus si le coup est proche de pierres existantes (rayon 2), mais plafonné pour éviter les coups “dans le tas”.
+- **Centralité** : bonus près du centre surtout en début de partie (poids réduit quand le plateau se remplit).
 
 ## Pseudocode de décision
 
@@ -28,10 +33,16 @@ forced = threat_search_forced_win(bounds)
 if forced exists:
 	return forced
 
+# 1b) Threat search défensif
+opp_forced = threat_search_forced_win_as_opponent(bounds)
+if opp_forced exists:
+	return opp_forced
+
 best_score = -inf; best_move = none
 for each empty cell in bounds:
 	if makes_win(me): return cell
 	if blocks_win(opponent): take it with high score
+	if blocks open_four_or_hidden_four(opponent): take it before generic heuristic
 	score = evaluate_position(cell)
 	keep best
 

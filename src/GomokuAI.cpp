@@ -584,7 +584,9 @@ static Point search_best_move(
     int best_val = -INF;
 
     bool time_up = false;
-    for (int depth = 1; depth <= 5; ++depth) {
+    // Go deeper than 5! The time check will stop us anyway.
+    // 20 is the max depth supported by our killer_moves array.
+    for (int depth = 1; depth < 20; ++depth) {
         if (std::chrono::steady_clock::now() >= deadline) break;
 
         int alpha = -INF;

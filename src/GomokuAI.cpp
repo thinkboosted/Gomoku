@@ -32,13 +32,7 @@ uint64_t GomokuAI::zobrist_at(int x, int y, int player) const {
     return zobrist[(static_cast<size_t>(x) * static_cast<size_t>(height) + static_cast<size_t>(y)) * 3ULL + static_cast<size_t>(player)];
 }
 
-void GomokuAI::init(int size) {
-    width = size;
-    height = size;
-    board.assign(width, std::vector<int>(height, 0));
-    init_zobrist();
-    hash_key = 0;
-}
+
 
 void GomokuAI::update_board(int x, int y, int player) {
     if (x >= 0 && x < width && y >= 0 && y < height) {
@@ -184,12 +178,16 @@ struct TTEntry {
     int best_y;
 };
 
+static std::unordered_map<uint64_t, TTEntry> global_tt;
+static Point killer_moves[20][2]; // [depth][slot]
+
 } // namespace detail
 
 namespace {
 
 constexpr int INF = 1'000'000'000;
 constexpr int WIN_SCORE = 900'000'000;
+constexpr int KILLER_SCORE = 10'000'000;
 
 inline uint64_t tt_key(uint64_t base, int player_to_move) {
     return base ^ (player_to_move == 1 ? detail::TT_SIDE_P1 : detail::TT_SIDE_P2);
@@ -234,7 +232,7 @@ int pattern_score(const LineStats& ls) {
     if (ls.count >= 5) return 1'000'000'000; // instant win
     if (ls.count == 4 && ls.open1 && ls.open2) return 200'000; // open four
     if (ls.count == 4 && (ls.open1 || ls.open2)) return 50'000;  // closed four
-    if (ls.count == 3 && ls.open1 && ls.open2) return 15'000; // open three (threat to become four)
+    if (ls.count == 3 && ls.open1 && ls.open2) return 40'000; // open three (major threat)
     if (ls.count == 3 && (ls.open1 || ls.open2)) return 2'000;  // closed three
     if (ls.count == 2 && ls.open1 && ls.open2) return 800;
     if (ls.count == 2 && (ls.open1 || ls.open2)) return 150;
@@ -410,20 +408,26 @@ static std::vector<detail::Move> generate_candidates(
     const detail::Bounds& bounds,
     int player,
     int opponent,
-    int max_moves)
+    int max_moves,
+    int ply)
 {
     std::vector<detail::Move> moves;
     moves.reserve(static_cast<size_t>(max_moves) * 2ULL);
+
+    int k_idx = (ply >= 0 && ply < 20) ? ply : 0;
+    Point k1 = detail::killer_moves[k_idx][0];
+    Point k2 = detail::killer_moves[k_idx][1];
 
     for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
         for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
             if (ai.board[x][y] != 0) continue;
 
             int s = ai.evaluate_position(x, y, player, opponent);
-            int self_len = detail::evaluate_line_local(ai.board, x, y, player);
-            int opp_len = detail::evaluate_line_local(ai.board, x, y, opponent);
-            if (self_len >= 5) s += WIN_SCORE;
-            if (opp_len >= 5) s += WIN_SCORE / 2; // urgent block
+            
+            // Killer Heuristic Bonus
+            if (x == k1.x && y == k1.y) s += KILLER_SCORE;
+            else if (x == k2.x && y == k2.y) s += KILLER_SCORE;
+
             moves.push_back({x, y, s});
         }
     }
@@ -436,6 +440,18 @@ static std::vector<detail::Move> generate_candidates(
     return moves;
 }
 
+static int get_max_move_score(GomokuAI& ai, const detail::Bounds& bounds, int player, int opponent) {
+    int max_s = 0; 
+    for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
+        for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
+            if (ai.board[x][y] != 0) continue;
+            int s = ai.evaluate_position(x, y, player, opponent);
+            if (s > max_s) max_s = s;
+        }
+    }
+    return max_s;
+}
+
 static int evaluate_state_fixed(
     GomokuAI& ai,
     const detail::Bounds& bounds,
@@ -443,18 +459,13 @@ static int evaluate_state_fixed(
     int root_opp)
 {
     // Cheap evaluation: best move potential for player minus best move potential for opponent.
-    // Keep it small and stable for alpha-beta.
-    auto self_moves = generate_candidates(ai, bounds, root_me, root_opp, 10);
-    auto opp_moves = generate_candidates(ai, bounds, root_opp, root_me, 10);
+    int best_self = get_max_move_score(ai, bounds, root_me, root_opp);
+    int best_opp = get_max_move_score(ai, bounds, root_opp, root_me);
 
-    int best_self = self_moves.empty() ? 0 : self_moves.front().score;
-    int best_opp = opp_moves.empty() ? 0 : opp_moves.front().score;
-
-    // If root opponent has an immediate win threat, reflect it strongly.
-    for (const auto& m : opp_moves) {
-        if (detail::evaluate_line_local(ai.board, m.x, m.y, root_opp) >= 5) {
-            return -WIN_SCORE / 2;
-        }
+    // If opponent has a winning move, we are in trouble (unless it's our turn and we win first, handled by negamax).
+    // evaluate_position returns >= WIN_SCORE (9e8) for a win.
+    if (best_opp >= WIN_SCORE) {
+        return -WIN_SCORE;
     }
 
     return best_self - (best_opp * 9 / 10);
@@ -470,9 +481,9 @@ static int negamax(
     int opponent,
     int root_me,
     int root_opp,
-    std::unordered_map<uint64_t, detail::TTEntry>& tt,
     const std::chrono::steady_clock::time_point& deadline,
-    bool& time_up)
+    bool& time_up,
+    int ply)
 {
     if (time_up || std::chrono::steady_clock::now() >= deadline) {
         time_up = true;
@@ -486,8 +497,8 @@ static int negamax(
     }
 
     uint64_t key = tt_key(ai.get_hash_key(), player_to_move);
-    auto it = tt.find(key);
-    if (it != tt.end() && it->second.depth >= depth) {
+    auto it = detail::global_tt.find(key);
+    if (it != detail::global_tt.end() && it->second.depth >= depth) {
         return it->second.value;
     }
 
@@ -495,7 +506,7 @@ static int negamax(
     int best_x = -1;
     int best_y = -1;
 
-    auto moves = generate_candidates(ai, bounds, player_to_move, opponent, 12);
+    auto moves = generate_candidates(ai, bounds, player_to_move, opponent, 12, ply);
     if (moves.empty()) {
         int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp);
         int color = (player_to_move == root_me) ? 1 : -1;
@@ -515,7 +526,7 @@ static int negamax(
         if (detail::evaluate_line_local(ai.board, mv.x, mv.y, player_to_move) >= 5) {
             value = WIN_SCORE - (5 - depth);
         } else {
-            value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, player_to_move, root_me, root_opp, tt, deadline, time_up);
+            value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, player_to_move, root_me, root_opp, deadline, time_up, ply + 1);
         }
 
         // Undo
@@ -528,11 +539,22 @@ static int negamax(
             best_y = mv.y;
         }
         alpha = std::max(alpha, value);
-        if (alpha >= beta) break;
+        if (alpha >= beta) {
+            // Beta Cutoff -> Store Killer Move
+            // Store at current ply index (safe range check implicit if ply < 20)
+            if (ply < 20) {
+                // If it's different from the first killer move, push it
+                if (detail::killer_moves[ply][0].x != mv.x || detail::killer_moves[ply][0].y != mv.y) {
+                    detail::killer_moves[ply][1] = detail::killer_moves[ply][0];
+                    detail::killer_moves[ply][0] = {mv.x, mv.y};
+                }
+            }
+            break;
+        }
     }
 
     if (!time_up && best_x != -1) {
-        tt[key] = detail::TTEntry{depth, best_value, best_x, best_y};
+        detail::global_tt[key] = detail::TTEntry{depth, best_value, best_x, best_y};
     }
     return best_value;
 }
@@ -548,10 +570,14 @@ static Point search_best_move(
     auto start = std::chrono::steady_clock::now();
     auto deadline = start + std::chrono::milliseconds(time_limit_ms);
 
-    std::unordered_map<uint64_t, detail::TTEntry> tt;
-    tt.reserve(200'000);
+    // Clear Killer Moves for this new search to avoid history bias from previous turns
+    for(int i=0; i<20; ++i) {
+        detail::killer_moves[i][0] = {-1, -1};
+        detail::killer_moves[i][1] = {-1, -1};
+    }
 
-    auto root_moves = generate_candidates(ai, bounds, me, opponent, 24);
+    // Root moves: pass 0 for depth, though killer moves at root are less critical as we sort by PV.
+    auto root_moves = generate_candidates(ai, bounds, me, opponent, 24, 0);
     if (root_moves.empty()) return {-1, -1};
 
     Point best = {root_moves.front().x, root_moves.front().y};
@@ -585,7 +611,7 @@ static Point search_best_move(
             if (detail::evaluate_line_local(ai.board, mv.x, mv.y, me) >= 5) {
                 value = WIN_SCORE;
             } else {
-                value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, me, me, opponent, tt, deadline, time_up);
+                value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, me, me, opponent, deadline, time_up, 1);
             }
 
             ai.update_board(mv.x, mv.y, 0);
@@ -658,7 +684,7 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
             bool blocked_forward = (!ls.open1) && blocked_by_adjacent_opponent(d[0], d[1], true);
             bool blocked_backward = (!ls.open2) && blocked_by_adjacent_opponent(d[0], d[1], false);
             if (blocked_forward || blocked_backward) {
-                s = std::min(s, 8'000); // favor autre ouverture sauf si compensé par un fork
+                s = std::min(s, 5'000); // favor autre ouverture sauf si compensé par un fork
             }
         }
         if (!meaningful_attack && (pattern >= 2'000 || gapped > 0 || spaced > 0)) {
@@ -744,7 +770,7 @@ int GomokuAI::evaluate_line(int x, int y, int player) {
     return detail::evaluate_line_local(board, x, y, player);
 }
 
-Point GomokuAI::find_best_move() {
+Point GomokuAI::find_best_move(int time_limit) {
     // Main policy: center on empty board, forced-win scan, then heuristic best.
     int best_score = -1;
     Point best_move = {-1, -1};
@@ -755,114 +781,36 @@ Point GomokuAI::find_best_move() {
     // Player IDs are fixed by protocol: we are 1, opponent is 2.
     const int me = 1;
     const int opponent = 2;
-    static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
 
     // Use a slightly larger margin on larger boards to not miss distant threats.
-    int margin = (width > 12 ? 3 : 2);
+    int margin = 4;
     detail::Bounds b = detail::compute_bounds(board, margin);
     detail::Bounds guard_b = detail::expand_bounds(b, 1, width, height);
 
-    // Mandatory tactics first: never let a deeper heuristic/threat-search override these.
-                // 1) Win now
-                for (int x = b.start_x; x <= b.end_x; ++x) {
-                    for (int y = b.start_y; y <= b.end_y; ++y) {
-                        if (board[x][y] != 0) continue;
-                        if (evaluate_line(x, y, me) >= 5) return {x, y};
-                    }
-                }
-            
-                // 2) Block opponent win now
-                for (int x = b.start_x; x <= b.end_x; ++x) {
-                    for (int y = b.start_y; y <= b.end_y; ++y) {
-                        if (board[x][y] != 0) continue;
-                        if (evaluate_line(x, y, opponent) >= 5) return {x, y};
-                    }
-                }
-            
-                // 3) Create our own Open Four (Attack) - Win in 1 move
-                for (int x = b.start_x; x <= b.end_x; ++x) {
-                    for (int y = b.start_y; y <= b.end_y; ++y) {
-                        if (board[x][y] != 0) continue;
-                        int my_pattern = 0;
-                        for (auto& d : dirs) {
-                            detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
-                            my_pattern = std::max(my_pattern, detail::pattern_score(ls));
-                        }
-                        if (my_pattern >= 200'000) return {x, y};
-                    }
-                }
-            
-                // 4) Block opponent Open Four (Defense) - Must block or lose
-                for (int x = b.start_x; x <= b.end_x; ++x) {
-                    for (int y = b.start_y; y <= b.end_y; ++y) {
-                        if (board[x][y] != 0) continue;
-                        int opp_pattern = 0;
-                        for (auto& d : dirs) {
-                            detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                            opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
-                        }
-                        if (opp_pattern >= 150'000) return {x, y};
-                    }
-                }
-            
-                // 5) Block opponent Hidden Four (Defense)
-                for (int x = b.start_x; x <= b.end_x; ++x) {
-                    for (int y = b.start_y; y <= b.end_y; ++y) {
-                        if (board[x][y] != 0) continue;
-                        int opp_gapped = 0;
-                        for (auto& d : dirs) {
-                            opp_gapped = std::max(opp_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], opponent));
-                        }
-                        if (opp_gapped >= 60'000) return {x, y};
-                    }
-                }
-            
-                // 6) Create our own Hidden Four (Attack)
-                for (int x = b.start_x; x <= b.end_x; ++x) {
-                    for (int y = b.start_y; y <= b.end_y; ++y) {
-                        if (board[x][y] != 0) continue;
-                        int my_gapped = 0;
-                        for (auto& d : dirs) {
-                            my_gapped = std::max(my_gapped, detail::gapped_threat_score(board, x, y, d[0], d[1], me));
-                        }
-                        if (my_gapped >= 60'000) return {x, y};
-                    }
-                }
-            
-                // 7) Block opponent Fork (Double Threat) or Single Closed Four/Open Three
-                // We prioritize blocking a Fork (>=2 threats) over a single threat.
-                Point single_threat = {-1, -1};
-                for (int x = b.start_x; x <= b.end_x; ++x) {
-                    for (int y = b.start_y; y <= b.end_y; ++y) {
-                        if (board[x][y] != 0) continue;
-                        int threats = 0;
-                        for (auto& d : dirs) {
-                            detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                            if (detail::pattern_score(ls) >= 10'000) {
-                                threats++;
-                            }
-                        }
-                        if (threats >= 2) return {x, y}; // Fork found - Immediate block
-                        if (threats == 1 && single_threat.x == -1) {
-                            single_threat = {x, y};
-                        }
-                    }
-                }
-                if (single_threat.x != -1) return single_threat;    // Threat search (2-ply) after mandatory defense.
-    Point forced = detail::threat_search_forced_win(board, b, margin, me, opponent, width, height);
-    if (forced.x != -1) return forced;
-
-    // Defensive threat search: if the opponent has a short forced win line, occupy its start.
-    Point opp_forced = detail::threat_search_forced_win(board, b, margin, opponent, me, width, height);
-    if (opp_forced.x != -1 && board[opp_forced.x][opp_forced.y] == 0) {
-        return opp_forced;
+    // Mandatory tactics first: simple instant win/loss check.
+    // We keep these for safety, but deeper threats are handled by search_best_move.
+    
+    // 1) Win now
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            if (evaluate_line(x, y, me) >= 5) return {x, y};
+        }
     }
 
-    // Main improvement: iterative-deepening alpha-beta search (time-bounded).
-    // Keep budget conservative to avoid timeouts on dense boards.
-    if (detail::count_stones(board) >= 10) {
-        constexpr int SEARCH_TIME_MS = 1200;
-        Point p = search_best_move(*this, b, me, opponent, SEARCH_TIME_MS);
+    // 2) Block opponent win now
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            if (evaluate_line(x, y, opponent) >= 5) return {x, y};
+        }
+    }
+
+    // Main search: iterative-deepening alpha-beta search (time-bounded).
+    if (detail::count_stones(board) >= 2) {
+        // Reserve a small safety margin (e.g. 50ms) to ensure we output before timeout.
+        int search_time = std::max(50, time_limit - 100);
+        Point p = search_best_move(*this, b, me, opponent, search_time);
         if (p.x != -1) return p;
     }
 
@@ -911,4 +859,18 @@ Point GomokuAI::find_best_move() {
     }
 
     return best_move;
+}
+void GomokuAI::init(int size) {
+    width = size;
+    height = size;
+    board.assign(width, std::vector<int>(height, 0));
+    init_zobrist();
+    hash_key = 0;
+    detail::global_tt.clear();
+    detail::global_tt.reserve(200000);
+    // Clear killer moves
+    for(int i=0; i<20; ++i) {
+        detail::killer_moves[i][0] = {-1, -1};
+        detail::killer_moves[i][1] = {-1, -1};
+    }
 }

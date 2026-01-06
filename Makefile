@@ -8,7 +8,7 @@ OBJ     =   $(SRC:.cpp=.o)
 
 CXX     =   g++
 
-CXXFLAGS = -Wall -Wextra -Werror -std=c++17 -I./src
+CXXFLAGS = -Wall -Wextra -Werror -std=c++17 -I./src -O3 -march=native -flto
 
 TEST_NAME = tests/test_gomoku_ai
 TEST_SRC  = tests/test_gomoku_ai.cpp src/GomokuAI.cpp

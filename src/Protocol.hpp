@@ -19,6 +19,8 @@ protected:
 
 private:
     bool should_stop;
+    int timeout_turn = 1000;
+    int timeout_match = 100000;
 
     void handle_command(std::string& cmd);
 

@@ -14,7 +14,7 @@ public:
     GomokuAI();
     void init(int size);
     void update_board(int x, int y, int player);
-    Point find_best_move();
+    Point find_best_move(int time_limit = 1000);
     Point parse_coordinates(const std::string& s);
     uint64_t get_hash_key() const { return hash_key; }
 

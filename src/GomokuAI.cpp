@@ -423,7 +423,7 @@ static std::vector<detail::Move> generate_candidates(
             if (ai.board[x][y] != 0) continue;
 
             int s = ai.evaluate_position(x, y, player, opponent);
-            
+
             // Killer Heuristic Bonus
             if (x == k1.x && y == k1.y) s += KILLER_SCORE;
             else if (x == k2.x && y == k2.y) s += KILLER_SCORE;
@@ -441,7 +441,7 @@ static std::vector<detail::Move> generate_candidates(
 }
 
 static int get_max_move_score(GomokuAI& ai, const detail::Bounds& bounds, int player, int opponent) {
-    int max_s = 0; 
+    int max_s = 0;
     for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
         for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
             if (ai.board[x][y] != 0) continue;
@@ -700,7 +700,7 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
         detail::LineStats ls_opp = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
         int p = detail::pattern_score(ls_opp);
         int g = detail::gapped_threat_score(board, x, y, d[0], d[1], opponent);
-        
+
         // Count directions where opponent has at least an Open Three or similar strong threat
         if (p >= 15'000 || g >= 60'000) {
             opp_threat_dirs++;
@@ -789,7 +789,7 @@ Point GomokuAI::find_best_move(int time_limit) {
 
     // Mandatory tactics first: simple instant win/loss check.
     // We keep these for safety, but deeper threats are handled by search_best_move.
-    
+
     // 1) Win now
     for (int x = b.start_x; x <= b.end_x; ++x) {
         for (int y = b.start_y; y <= b.end_y; ++y) {
@@ -803,6 +803,53 @@ Point GomokuAI::find_best_move(int time_limit) {
         for (int y = b.start_y; y <= b.end_y; ++y) {
             if (board[x][y] != 0) continue;
             if (evaluate_line(x, y, opponent) >= 5) return {x, y};
+        }
+    }
+
+    // 3) Create our own Open Four (Attack) - Win in 1 move
+    // This is better than blocking an Open Three, because it forces the opponent to defend.
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            int my_pattern = 0;
+            static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
+            for (auto& d : dirs) {
+                detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
+                my_pattern = std::max(my_pattern, detail::pattern_score(ls));
+            }
+            if (my_pattern >= 200'000) return {x, y};
+        }
+    }
+
+    // 4) Block opponent Open Four (Defense) - Must block or lose
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            int opp_pattern = 0;
+            static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
+            for (auto& d : dirs) {
+                detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
+                opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
+            }
+            if (opp_pattern >= 150'000) return {x, y};
+        }
+    }
+
+    // 5) Block opponent Open Three (Defense) - Urgent threat
+    // An open three becomes an open four next turn -> Unstoppable win.
+    // We strictly prioritize this over other non-winning moves.
+    for (int x = b.start_x; x <= b.end_x; ++x) {
+        for (int y = b.start_y; y <= b.end_y; ++y) {
+            if (board[x][y] != 0) continue;
+            int opp_pattern = 0;
+            static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
+            for (auto& d : dirs) {
+                detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
+                opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
+            }
+            // 40'000 is our score for Open Three.
+            // We check >= 35'000 to be safe and include potential stronger threats.
+            if (opp_pattern >= 35'000) return {x, y};
         }
     }
 

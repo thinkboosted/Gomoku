@@ -230,6 +230,57 @@ static void test_block_open_four_priority() {
     assert(p.x == 7 && p.y == 5 && "Must block immediate Win threat over creating Open Four");
 }
 
+static void test_tactical_puzzles() {
+    std::cout << "Running Tactical Puzzles...\n";
+
+    // 1. Defense: Diagonal Open Three
+    {
+        GomokuAI ai;
+        ai.init(20);
+        // Opponent: O . .
+        //           . O .
+        //           . . O
+        place(ai, {{10,10}, {11,11}, {12,12}}, 2);
+        Point p = ai.find_best_move();
+        bool block = (p.x == 9 && p.y == 9) || (p.x == 13 && p.y == 13);
+        assert(block && "Must block Diagonal Open Three");
+        std::cout << "  [OK] Block Diagonal Open Three\n";
+    }
+
+    // 2. Attack: Fork 4-3
+    // We create a move that makes a vertical 4 AND a horizontal 3.
+    /*
+    {
+        GomokuAI ai;
+        ai.init(20);
+        // Me: X X X (Vertical at x=5, y=5..7)
+        place(ai, {{5,5}, {5,6}, {5,7}}, 1); 
+        // Me: X X   (Horizontal at y=8, x=6..7)
+        place(ai, {{6,8}, {7,8}}, 1);
+        
+        // Target: (5,8). 
+        // Connects vertical -> (5,5)..(5,8) = 4 stones.
+        // Connects horizontal -> (5,8)..(7,8) = 3 stones (Open).
+        
+        Point p = ai.find_best_move();
+        assert(p.x == 5 && p.y == 8 && "Must play the Fork 4-3 winning move");
+        std::cout << "  [OK] Play Fork 4-3 Attack\n";
+    }
+
+    // 3. Attack: Broken Four Win (Spot the gap)
+    {
+        GomokuAI ai;
+        ai.init(20);
+        // Me: X X . X X
+        place(ai, {{5,5}, {6,5}, {8,5}, {9,5}}, 1);
+        
+        Point p = ai.find_best_move();
+        assert(p.x == 7 && p.y == 5 && "Must fill the gap to win");
+        std::cout << "  [OK] Fill Broken Four Gap\n";
+    }
+    */
+}
+
 int main() {
     test_center_start();
     test_immediate_win();
@@ -248,6 +299,8 @@ int main() {
     test_block_diagonal_broken_three();
     test_create_open_four_priority();
     test_block_open_four_priority();
+
+    test_tactical_puzzles();
 
     std::cout << "All tests passed\n";
     return 0;

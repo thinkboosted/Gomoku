@@ -44,13 +44,17 @@ void Protocol::handle_turn(std::string& cmd) {
         ai.update_board(opp.x, opp.y, 2); // 2 is opponent
     }
 
-    Point p = ai.find_best_move(timeout_turn);
+    int limit = timeout_turn;
+    if (time_left < limit) limit = time_left;
+    Point p = ai.find_best_move(limit);
     ai.update_board(p.x, p.y, 1); // 1 is us // 1 is us
     std::cout << p.x << "," << p.y << std::endl;
 }
 
 void Protocol::handle_begin([[maybe_unused]] std::string& cmd) {
-    Point p = ai.find_best_move(timeout_turn);
+    int limit = timeout_turn;
+    if (time_left < limit) limit = time_left;
+    Point p = ai.find_best_move(limit);
     ai.update_board(p.x, p.y, 1); // 1 is us
     std::cout << p.x << "," << p.y << std::endl;
 }
@@ -73,7 +77,9 @@ void Protocol::handle_board([[maybe_unused]] std::string& cmd) {
             } catch (...) {}
         }
     }
-    Point p = ai.find_best_move(timeout_turn);
+    int limit = timeout_turn;
+    if (time_left < limit) limit = time_left;
+    Point p = ai.find_best_move(limit);
     ai.update_board(p.x, p.y, 1); // 1 is us
     std::cout << p.x << "," << p.y << std::endl;
 }
@@ -95,15 +101,7 @@ void Protocol::handle_info(std::string& cmd) {
              int val;
             ss >> val;
             if (!ss.fail()) {
-                // If we have a huge bank, we might want to use more than timeout_turn if allowed,
-                // but usually timeout_turn is a hard cap per move.
-                // If timeout_turn is 0 (unlimited), we use time_left / remaining_moves.
-                if (timeout_turn == 0) {
-                     timeout_turn = val / 25; // Estimate 25 moves remaining
-                     if (timeout_turn < 100) timeout_turn = 100;
-                } else if (val < timeout_turn) {
-                    timeout_turn = val;
-                }
+                time_left = val;
             }
         } else {
              std::string val;

@@ -21,6 +21,7 @@ private:
     bool should_stop;
     int timeout_turn = 1000;
     int timeout_match = 100000;
+    int time_left = 2147483647;
 
     void handle_command(std::string& cmd);
 

@@ -181,6 +181,22 @@ struct TTEntry {
 static std::unordered_map<uint64_t, TTEntry> global_tt;
 static Point killer_moves[20][2]; // [depth][slot]
 
+bool has_neighbor(const std::vector<std::vector<int>>& board, int x, int y, int dist) {
+    int w = board.size();
+    int h = board[0].size();
+    int min_x = std::max(0, x - dist);
+    int max_x = std::min(w - 1, x + dist);
+    int min_y = std::max(0, y - dist);
+    int max_y = std::min(h - 1, y + dist);
+
+    for (int i = min_x; i <= max_x; ++i) {
+        for (int j = min_y; j <= max_y; ++j) {
+            if (board[i][j] != 0) return true;
+        }
+    }
+    return false;
+}
+
 } // namespace detail
 
 namespace {
@@ -232,7 +248,7 @@ int pattern_score(const LineStats& ls) {
     if (ls.count >= 5) return 1'000'000'000; // instant win
     if (ls.count == 4 && ls.open1 && ls.open2) return 200'000; // open four
     if (ls.count == 4 && (ls.open1 || ls.open2)) return 50'000;  // closed four
-    if (ls.count == 3 && ls.open1 && ls.open2) return 40'000; // open three (major threat)
+    if (ls.count == 3 && ls.open1 && ls.open2) return 80'000; // open three (major threat) - Increased from 40k to prioritize defense
     if (ls.count == 3 && (ls.open1 || ls.open2)) return 2'000;  // closed three
     if (ls.count == 2 && ls.open1 && ls.open2) return 800;
     if (ls.count == 2 && (ls.open1 || ls.open2)) return 150;
@@ -422,6 +438,9 @@ static std::vector<detail::Move> generate_candidates(
         for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
             if (ai.board[x][y] != 0) continue;
 
+            // Optimization: Only consider moves within range 2 of existing stones
+            if (!detail::has_neighbor(ai.board, x, y, 2)) continue;
+
             int s = ai.evaluate_position(x, y, player, opponent);
 
             // Killer Heuristic Bonus
@@ -506,7 +525,7 @@ static int negamax(
     int best_x = -1;
     int best_y = -1;
 
-    auto moves = generate_candidates(ai, bounds, player_to_move, opponent, 12, ply);
+    auto moves = generate_candidates(ai, bounds, player_to_move, opponent, 24, ply);
     if (moves.empty()) {
         int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp);
         int color = (player_to_move == root_me) ? 1 : -1;
@@ -777,6 +796,9 @@ Point GomokuAI::find_best_move(int time_limit) {
     int best_score = -1;
     Point best_move = {-1, -1};
 
+    // Clear Transposition Table for each new move to avoid stale data/collisions
+    detail::global_tt.clear();
+
     // Strategy: If the board is empty, the center is statistically the best start.
     if (detail::board_is_empty(board)) return {width/2, height/2};
 
@@ -805,53 +827,6 @@ Point GomokuAI::find_best_move(int time_limit) {
         for (int y = b.start_y; y <= b.end_y; ++y) {
             if (board[x][y] != 0) continue;
             if (evaluate_line(x, y, opponent) >= 5) return {x, y};
-        }
-    }
-
-    // 3) Create our own Open Four (Attack) - Win in 1 move
-    // This is better than blocking an Open Three, because it forces the opponent to defend.
-    for (int x = b.start_x; x <= b.end_x; ++x) {
-        for (int y = b.start_y; y <= b.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-            int my_pattern = 0;
-            static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
-            for (auto& d : dirs) {
-                detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
-                my_pattern = std::max(my_pattern, detail::pattern_score(ls));
-            }
-            if (my_pattern >= 200'000) return {x, y};
-        }
-    }
-
-    // 4) Block opponent Open Four (Defense) - Must block or lose
-    for (int x = b.start_x; x <= b.end_x; ++x) {
-        for (int y = b.start_y; y <= b.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-            int opp_pattern = 0;
-            static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
-            for (auto& d : dirs) {
-                detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
-            }
-            if (opp_pattern >= 150'000) return {x, y};
-        }
-    }
-
-    // 5) Block opponent Open Three (Defense) - Urgent threat
-    // An open three becomes an open four next turn -> Unstoppable win.
-    // We strictly prioritize this over other non-winning moves.
-    for (int x = b.start_x; x <= b.end_x; ++x) {
-        for (int y = b.start_y; y <= b.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-            int opp_pattern = 0;
-            static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
-            for (auto& d : dirs) {
-                detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
-            }
-            // 40'000 is our score for Open Three.
-            // We check >= 35'000 to be safe and include potential stronger threats.
-            if (opp_pattern >= 35'000) return {x, y};
         }
     }
 

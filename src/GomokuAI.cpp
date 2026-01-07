@@ -5,6 +5,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <cstdint>
+#include <iostream>
 
 GomokuAI::GomokuAI() : width(20), height(20) {
 }
@@ -248,8 +249,8 @@ int pattern_score(const LineStats& ls) {
     if (ls.count >= 5) return 1'000'000'000; // instant win
     if (ls.count == 4 && ls.open1 && ls.open2) return 200'000; // open four
     if (ls.count == 4 && (ls.open1 || ls.open2)) return 50'000;  // closed four
-    if (ls.count == 3 && ls.open1 && ls.open2) return 80'000; // open three (major threat) - Increased from 40k to prioritize defense
-    if (ls.count == 3 && (ls.open1 || ls.open2)) return 2'000;  // closed three
+    if (ls.count == 3 && ls.open1 && ls.open2) return 120'000; // open three (major threat)
+    if (ls.count == 3 && (ls.open1 || ls.open2)) return 10'000;  // closed three (pre-threat to simple four)
     if (ls.count == 2 && ls.open1 && ls.open2) return 800;
     if (ls.count == 2 && (ls.open1 || ls.open2)) return 150;
     return (ls.open1 || ls.open2) ? 40 : 10;
@@ -475,19 +476,33 @@ static int evaluate_state_fixed(
     GomokuAI& ai,
     const detail::Bounds& bounds,
     int root_me,
-    int root_opp)
+    int root_opp,
+    int player_to_move,
+    int ply)
 {
     // Cheap evaluation: best move potential for player minus best move potential for opponent.
     int best_self = get_max_move_score(ai, bounds, root_me, root_opp);
     int best_opp = get_max_move_score(ai, bounds, root_opp, root_me);
 
-    // If opponent has a winning move, we are in trouble (unless it's our turn and we win first, handled by negamax).
-    // evaluate_position returns >= WIN_SCORE (9e8) for a win.
+    // If opponent has a winning move, we are in trouble.
+    // Use ply to keep win/loss scores consistent with dynamic search.
     if (best_opp >= WIN_SCORE) {
-        return -WIN_SCORE;
+        return -(WIN_SCORE - ply);
+    }
+    if (best_self >= WIN_SCORE) {
+        return (WIN_SCORE - ply);
     }
 
-    return best_self - (best_opp * 9 / 10);
+    // Tempo heuristic: The player to move gets to execute their threat.
+    if (player_to_move == root_opp) {
+        if (best_opp >= 195'000) return -850'000'000; // Almost certain loss
+        return best_self - (best_opp * 2); 
+    } else {
+        // Our turn
+        if (best_opp >= 195'000) return -850'000'000; // Must block!
+        if (best_self >= 150'000) return 850'000'000; // Almost certain win
+        return (best_self * 2) - best_opp;
+    }
 }
 
 static int negamax(
@@ -510,7 +525,7 @@ static int negamax(
     }
 
     if (depth == 0) {
-        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp);
+        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp, player_to_move, ply);
         int color = (player_to_move == root_me) ? 1 : -1;
         return color * eval;
     }
@@ -527,7 +542,7 @@ static int negamax(
 
     auto moves = generate_candidates(ai, bounds, player_to_move, opponent, 24, ply);
     if (moves.empty()) {
-        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp);
+        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp, player_to_move, ply);
         int color = (player_to_move == root_me) ? 1 : -1;
         return color * eval;
     }
@@ -643,6 +658,13 @@ static Point search_best_move(
                 local_best = {mv.x, mv.y};
             }
             alpha = std::max(alpha, value);
+            // DEBUG: Print root move scores
+            // std::cout << "Move (" << mv.x << "," << mv.y << ") Depth " << depth << " Val: " << value << std::endl;
+
+            // Optimization: If we found a winning move, take it immediately.
+            if (value >= WIN_SCORE - 100) {
+                return local_best;
+            }
         }
 
         if (!time_up) {

@@ -101,6 +101,8 @@ void Protocol::handle_info(std::string& cmd) {
                 if (timeout_turn == 0) {
                      timeout_turn = val / 25; // Estimate 25 moves remaining
                      if (timeout_turn < 100) timeout_turn = 100;
+                } else if (val < timeout_turn) {
+                    timeout_turn = val;
                 }
             }
         } else {

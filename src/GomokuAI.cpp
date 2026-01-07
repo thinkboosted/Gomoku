@@ -838,27 +838,13 @@ Point GomokuAI::find_best_move(int time_limit) {
     }
 
     // 5) Block opponent Open Three (Defense) - Urgent threat
-    // An open three becomes an open four next turn -> Unstoppable win.
-    // We strictly prioritize this over other non-winning moves.
-    for (int x = b.start_x; x <= b.end_x; ++x) {
-        for (int y = b.start_y; y <= b.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-            int opp_pattern = 0;
-            static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
-            for (auto& d : dirs) {
-                detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-                opp_pattern = std::max(opp_pattern, detail::pattern_score(ls));
-            }
-            // 40'000 is our score for Open Three.
-            // We check >= 35'000 to be safe and include potential stronger threats.
-            if (opp_pattern >= 35'000) return {x, y};
-        }
-    }
-
+    // REMOVED: We let the main search handle this to detect forks properly.
+    // An Open Three is dangerous, but blindly picking the first block might ignore a double threat.
+    
     // Main search: iterative-deepening alpha-beta search (time-bounded).
     if (detail::count_stones(board) >= 2) {
-        // Reserve a small safety margin (e.g. 50ms) to ensure we output before timeout.
-        int search_time = std::max(50, time_limit - 100);
+        // Reserve a larger safety margin (200ms) to ensure we output before timeout on slow servers.
+        int search_time = std::max(50, time_limit - 200);
         Point p = search_best_move(*this, b, me, opponent, search_time);
         if (p.x != -1) return p;
     }

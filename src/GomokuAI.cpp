@@ -248,9 +248,9 @@ LineStats get_line_stats(const std::vector<std::vector<int>>& board, int x, int 
 int pattern_score(const LineStats& ls) {
     if (ls.count >= 5) return 1'000'000'000; // instant win
     if (ls.count == 4 && ls.open1 && ls.open2) return 200'000; // open four
-    if (ls.count == 4 && (ls.open1 || ls.open2)) return 50'000;  // closed four
+    if (ls.count == 4 && (ls.open1 || ls.open2)) return 15'000;  // closed four (Sleeping Four): reduced to avoid bad forcing moves
     if (ls.count == 3 && ls.open1 && ls.open2) return 120'000; // open three (major threat)
-    if (ls.count == 3 && (ls.open1 || ls.open2)) return 10'000;  // closed three (pre-threat to simple four)
+    if (ls.count == 3 && (ls.open1 || ls.open2)) return 4'000;  // closed three
     if (ls.count == 2 && ls.open1 && ls.open2) return 800;
     if (ls.count == 2 && (ls.open1 || ls.open2)) return 150;
     return (ls.open1 || ls.open2) ? 40 : 10;
@@ -316,9 +316,9 @@ int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y
 
         // Reward non-contiguous threats that rely on at least one real gap.
         if (stones == 4 && max_seg <= 2 && segments >= 2) {
-            best = std::max(best, 60000); // XX.XX style hidden four
+            best = std::max(best, 160'000); // XX.XX style hidden four (almost as good as Open Four)
         } else if (stones == 3 && max_seg <= 2 && segments >= 2) {
-            best = std::max(best, 2500); // XX.X or X.XX split three
+            best = std::max(best, 100'000); // XX.X or X.XX split three (almost as good as Open Three)
         }
     }
     return best;
@@ -691,20 +691,6 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
     bool meaningful_attack = false;
     bool meaningful_defense = false;
 
-    // Detect whether a blocked end is specifically blocked by an adjacent opponent stone.
-    auto blocked_by_adjacent_opponent = [&](int dx, int dy, bool forward) {
-        int step_x = forward ? dx : -dx;
-        int step_y = forward ? dy : -dy;
-        int nx = x + step_x;
-        int ny = y + step_y;
-        while (nx >= 0 && nx < width && ny >= 0 && ny < height && board[nx][ny] == me) {
-            nx += step_x;
-            ny += step_y;
-        }
-        if (nx < 0 || nx >= width || ny < 0 || ny >= height) return false; // border is not “collé adversaire”
-        return board[nx][ny] == opponent;
-    };
-
     // Attack: how strong we become if we play here.
     int threat_dirs = 0; // count directions that create an immediate threat (open three or better)
     for (int i = 0; i < 4; ++i) {
@@ -717,19 +703,14 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
         int s = pattern + gapped + spaced;
 
         // Track how many directions yield at least an open three / split three (for double-threat bonus).
-        if (pattern >= 15'000 || gapped >= 60'000) {
+        // Thresholds increased to avoid counting Sleeping Fours (15k) as threats.
+        if (pattern >= 50'000 || gapped >= 80'000) {
             threat_dirs++;
         }
 
-        // If playing here only makes a closed four whose blocked side is an adjacent opponent stone,
-        // downweight it (opponent already sits on the only exit). Prefer other openings unless forked.
-        if (ls.count == 4 && (ls.open1 ^ ls.open2)) {
-            bool blocked_forward = (!ls.open1) && blocked_by_adjacent_opponent(d[0], d[1], true);
-            bool blocked_backward = (!ls.open2) && blocked_by_adjacent_opponent(d[0], d[1], false);
-            if (blocked_forward || blocked_backward) {
-                s = std::min(s, 5'000); // favor autre ouverture sauf si compensé par un fork
-            }
-        }
+        // "Sleeping Four" penalty logic is now handled by the low score in pattern_score (15k).
+        // We no longer need explicit logic to downweight it here unless it's redundant.
+
         if (!meaningful_attack && (pattern >= 2'000 || gapped > 0 || spaced > 0)) {
             meaningful_attack = true;
         }
@@ -745,7 +726,7 @@ int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
         int g = detail::gapped_threat_score(board, x, y, d[0], d[1], opponent);
 
         // Count directions where opponent has at least an Open Three or similar strong threat
-        if (p >= 15'000 || g >= 60'000) {
+        if (p >= 50'000 || g >= 80'000) {
             opp_threat_dirs++;
         }
 

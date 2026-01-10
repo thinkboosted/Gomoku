@@ -6,6 +6,7 @@
 #include <limits>
 #include <array>
 #include <cstring>
+#include <cmath>
 
 // --- CONSTANTS & CONFIG ---
 constexpr int INF = 1000000000;
@@ -159,8 +160,10 @@ int eval_state(const GomokuAI& ai, int player) {
     const int W_LIVE_2 = 100;
 
     int total_score = 0;
-    int sx = std::max(0, ai.min_x - 1); int ex = std::min(ai.width - 1, ai.max_x + 1);
-    int sy = std::max(0, ai.min_y - 1); int ey = std::min(ai.height - 1, ai.max_y + 1);
+    // Iterate over the whole board to avoid missing lines starting outside dynamic bounds
+    // Optimization: we could iterate min_x-4 to max_x+4 but 20x20 is small enough.
+    int sx = 0; int ex = ai.width - 1;
+    int sy = 0; int ey = ai.height - 1;
 
     auto eval_line = [&](int cx, int cy, int dx, int dy) -> int {
         int idx = cy * ai.width + cx;
@@ -400,7 +403,32 @@ Point GomokuAI::find_best_move(int time_limit) {
         if (empty) return {width / 2, height / 2};
     }
 
-    // 2. Safe Fallback Initialization (Depth 1 equivalent / Tactical)
+    // --- Tactical pre-pass: win-now or block immediate threats (4 open/broken) ---
+    auto would_win = [&](int idx, int player) {
+        update_board(idx % width, idx / width, player);
+        bool win = check_win(board, idx, width, height, player);
+        update_board(idx % width, idx / width, 0);
+        return win;
+    };
+
+    int margin = 5; // Increased margin for safety
+    int sx_t = std::max(0, min_x - margin);
+    int ex_t = std::min(width - 1, max_x + margin);
+    int sy_t = std::max(0, min_y - margin);
+    int ey_t = std::min(height - 1, max_y + margin);
+
+    // Priority 1: Immediate win for us
+    for (int y = sy_t; y <= ey_t; ++y) {
+        for (int x = sx_t; x <= ex_t; ++x) {
+            int idx = y * width + x;
+            if (board[idx] != 0) continue;
+            if (would_win(idx, 1)) return {x, y};
+        }
+    }
+
+    // REMOVED Priority 2 & 3: Let negamax handle blocking to find the best defense (counter-attack)
+    // instead of blindly picking the first blocking move.
+
     Point best_move_global = {-1, -1};
     
     // Quick scan for immediate winning/blocking moves (Depth 1 equivalent)

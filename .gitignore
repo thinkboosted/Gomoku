@@ -56,3 +56,10 @@ dkms.conf
 
 # Binary
 pbrain-gomoku-ai
+
+*.json
+pb*
+*.log
+*test*
+*.md
+*.txt

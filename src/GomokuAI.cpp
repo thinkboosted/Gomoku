@@ -10,6 +10,8 @@
 // --- CONSTANTS & CONFIG ---
 constexpr int INF = 1000000000;
 constexpr int SCORE_WIN = 100000000;
+constexpr int TIMEOUT_SCORE = -2000000000; // Sentinel propagated when we abort for time
+constexpr int TIME_CHECK_STRIDE = 4096;    // Check wall clock every N visited nodes
 
 struct TTEntry {
     uint64_t key;
@@ -28,7 +30,9 @@ int history_moves[3][400];
 
 std::chrono::steady_clock::time_point start_time;
 int time_limit_ms;
+int guard_time_ms;
 bool time_out_flag;
+uint64_t nodes_visited;
 
 // --- HELPERS ---
 
@@ -42,9 +46,18 @@ void clear_history() {
 }
 
 bool check_time() {
+    // Count nodes first; only read the clock once every TIME_CHECK_STRIDE nodes.
+    ++nodes_visited;
+    if ((nodes_visited & (TIME_CHECK_STRIDE - 1)) != 0) {
+        return time_out_flag;
+    }
+
     if (time_out_flag) return true;
+
     auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count() >= time_limit_ms) {
+    int elapsed = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count());
+    // Hard guard: keep 300 ms margin and never exceed 4.7s even if the server announces 5s.
+    if (elapsed >= guard_time_ms) {
         time_out_flag = true;
     }
     return time_out_flag;
@@ -296,14 +309,14 @@ int score_move(const GomokuAI& ai, int idx, int player) {
 }
 
 int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
-    if ((ply & 127) == 0 && check_time()) return 0;
+    if (time_out_flag || check_time()) return TIMEOUT_SCORE;
 
     int opponent = (player == 1) ? 2 : 1;
     uint64_t key = ai.get_hash_key();
     int tt_idx = key % TT_SIZE;
     TTEntry& tte = TT[tt_idx];
 
-    if (tte.key == key && tte.depth >= depth) {
+    if (!time_out_flag && tte.key == key && tte.depth >= depth) {
         if (tte.flag == 0) return tte.value;
         if (tte.flag == 1 && tte.value >= beta) return tte.value;
         if (tte.flag == 2 && tte.value <= alpha) return tte.value;
@@ -377,11 +390,18 @@ int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
             break;
         }
 
-        int val = -negamax(ai, depth - 1, -beta, -alpha, opponent, ply + 1);
+        int child_val = negamax(ai, depth - 1, -beta, -alpha, opponent, ply + 1);
+
+        if (child_val == TIMEOUT_SCORE) {
+            ai.update_board(idx % w, idx / w, 0);
+            return TIMEOUT_SCORE;
+        }
+
+        int val = -child_val;
 
         ai.update_board(idx % w, idx / w, 0);
 
-        if (time_out_flag) return 0;
+        if (time_out_flag) return TIMEOUT_SCORE;
 
         if (val > best_val) {
             best_val = val;
@@ -402,7 +422,7 @@ int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
         }
     }
 
-    if (!time_out_flag) {
+    if (!time_out_flag && best_val != TIMEOUT_SCORE) {
         tte.key = key;
         tte.depth = depth;
         tte.value = best_val;
@@ -410,12 +430,14 @@ int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
         tte.best_move_idx = best_move;
     }
 
-    return best_val;
+    return time_out_flag ? TIMEOUT_SCORE : best_val;
 }
 
 Point GomokuAI::find_best_move(int time_limit) {
     start_time = std::chrono::steady_clock::now();
-    time_limit_ms = time_limit - 100;
+    time_limit_ms = std::max(0, time_limit - 100);
+    guard_time_ms = std::min(4700, std::max(0, time_limit_ms - 300));
+    nodes_visited = 0;
     time_out_flag = false;
 
     int center = (height/2) * width + (width/2);
@@ -426,6 +448,7 @@ Point GomokuAI::find_best_move(int time_limit) {
     }
 
     Point best = {-1, -1};
+    Point last_completed_best = best;
     int max_depth = 20;
 
     for (int depth = 1; depth <= max_depth; ++depth) {
@@ -472,14 +495,17 @@ Point GomokuAI::find_best_move(int time_limit) {
                  return {idx % width, idx / width};
             }
 
-            int val = -negamax(*this, depth - 1, -beta, -alpha, 2, 1);
+            int val = negamax(*this, depth - 1, -beta, -alpha, 2, 1);
 
             update_board(idx % w, idx / w, 0);
 
-            if (time_out_flag) break;
+            if (val == TIMEOUT_SCORE || time_out_flag) {
+                time_out_flag = true;
+                break;
+            }
 
-            if (val > best_val) {
-                best_val = val;
+            if (-val > best_val) {
+                best_val = -val;
                 current_best_idx = idx;
             }
             alpha = std::max(alpha, best_val);
@@ -489,9 +515,16 @@ Point GomokuAI::find_best_move(int time_limit) {
 
         if (current_best_idx != -1) {
             best = {current_best_idx % width, current_best_idx / width};
+            last_completed_best = best;
             if (best_val >= SCORE_WIN - 100) return best;
         }
     }
 
-    return best;
+    if (last_completed_best.x != -1) return last_completed_best;
+
+    for (int i = 0; i < width * height; ++i) {
+        if (board[i] == 0) return {i % width, i / width};
+    }
+
+    return {0, 0};
 }

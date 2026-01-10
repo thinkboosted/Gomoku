@@ -189,7 +189,9 @@ int eval_state(const GomokuAI& ai, int player) {
         else if (count == 3) val = (open_head && open_tail) ? W_LIVE_3 : (open_head || open_tail ? W_DEAD_3 : 0);
         else if (count == 2 && open_head && open_tail) val = W_LIVE_2;
 
-        return (p == player) ? val : -val;
+        // Bias: Attacking is slightly more valuable than defending in the static evaluation
+        if (p == player) return static_cast<int>(val * 1.2); // 20% Attack bonus
+        return -val;
     };
 
     for (int y = sy; y <= ey; ++y) {
@@ -259,10 +261,10 @@ int score_move(const GomokuAI& ai, int idx, int player, int ply) {
         // Weighting: Win > Block Win > Create 4 > Block 4
         if (my_count >= 5) score += 100000000;      // WIN NOW
         else if (opp_count >= 5) score += 90000000; // BLOCK WIN (Must do)
-        else if (my_count == 4) score += 500000;    // Create 4
-        else if (opp_count == 4) score += 400000;   // Block 4
-        else if (my_count == 3) score += 10000;
-        else if (opp_count == 3) score += 8000;
+        else if (my_count == 4) score += 1000000;   // Create 4 (Aggressive)
+        else if (opp_count == 4) score += 800000;    // Block 4
+        else if (my_count == 3) score += 20000;     // Create 3
+        else if (opp_count == 3) score += 15000;    // Block 3
     }
 
     return score;
@@ -424,6 +426,24 @@ Point GomokuAI::find_best_move(int time_limit) {
             if (board[idx] != 0) continue;
             if (would_win(idx, 1)) return {x, y};
         }
+    }
+
+    // Priority 2: Forced Defense (Instant Block)
+    // If opponent has a winning move, we MUST block it unless we won above.
+    // If there is exactly ONE winning spot for them (e.g. X X X X .), block it instantly.
+    // If there are multiple (double threat), we let Negamax try to handle the desperate situation.
+    std::vector<Point> forcing_blocks;
+    for (int y = sy_t; y <= ey_t; ++y) {
+        for (int x = sx_t; x <= ex_t; ++x) {
+            int idx = y * width + x;
+            if (board[idx] != 0) continue;
+            if (would_win(idx, 2)) {
+                forcing_blocks.push_back({x, y});
+            }
+        }
+    }
+    if (forcing_blocks.size() == 1) {
+        return forcing_blocks[0];
     }
 
     // REMOVED Priority 2 & 3: Let negamax handle blocking to find the best defense (counter-attack)

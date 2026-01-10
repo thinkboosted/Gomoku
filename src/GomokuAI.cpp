@@ -1,16 +1,56 @@
 #include "GomokuAI.hpp"
 #include <algorithm>
-#include <cmath>
-#include <array>
 #include <chrono>
-#include <unordered_map>
-#include <cstdint>
 #include <iostream>
+#include <vector>
+#include <limits>
+#include <array>
+#include <cstring>
 
-GomokuAI::GomokuAI() : width(20), height(20) {
+// --- CONSTANTS & CONFIG ---
+constexpr int INF = 1000000000;
+constexpr int SCORE_WIN = 100000000;
+
+struct TTEntry {
+    uint64_t key;
+    int depth;
+    int value;
+    int flag; // 0: Exact, 1: Lowerbound, 2: Upperbound
+    int best_move_idx;
+};
+
+constexpr int TT_SIZE = 1 << 20; 
+TTEntry TT[TT_SIZE];
+
+int DIRS[4]; 
+int killer_moves[100][2];
+int history_moves[3][400];
+
+std::chrono::steady_clock::time_point start_time;
+int time_limit_ms;
+bool time_out_flag;
+
+// --- HELPERS ---
+
+void clear_tt() {
+    std::memset(TT, 0, sizeof(TT));
 }
 
-namespace {
+void clear_history() {
+    std::memset(killer_moves, -1, sizeof(killer_moves));
+    std::memset(history_moves, 0, sizeof(history_moves));
+}
+
+bool check_time() {
+    if (time_out_flag) return true;
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count() >= time_limit_ms) {
+        time_out_flag = true;
+    }
+    return time_out_flag;
+}
+
+// --- ZOBRIST ---
 
 static uint64_t splitmix64(uint64_t& x) {
     uint64_t z = (x += 0x9e3779b97f4a7c15ULL);
@@ -19,885 +59,368 @@ static uint64_t splitmix64(uint64_t& x) {
     return z ^ (z >> 31);
 }
 
-} // namespace
-
 void GomokuAI::init_zobrist() {
-    zobrist.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 3ULL, 0ULL);
-    uint64_t seed = 0xC0FFEE123456789ULL ^ static_cast<uint64_t>(width * 1315423911u + height * 2654435761u);
-    for (size_t i = 0; i < zobrist.size(); ++i) {
-        zobrist[i] = splitmix64(seed);
-    }
+    zobrist.resize(width * height * 3);
+    uint64_t seed = 0x123456789ABCDEFULL;
+    for (auto& z : zobrist) z = splitmix64(seed);
 }
 
-uint64_t GomokuAI::zobrist_at(int x, int y, int player) const {
-    return zobrist[(static_cast<size_t>(x) * static_cast<size_t>(height) + static_cast<size_t>(y)) * 3ULL + static_cast<size_t>(player)];
+inline uint64_t GomokuAI::zobrist_at(int idx, int player) const {
+    return zobrist[idx * 3 + player];
 }
 
+// --- GOMOKU CLASS ---
 
+GomokuAI::GomokuAI() : width(20), height(20), min_x(10), max_x(10), min_y(10), max_y(10) {}
 
-void GomokuAI::update_board(int x, int y, int player) {
-    if (x >= 0 && x < width && y >= 0 && y < height) {
-        int prev = board[x][y];
-        if (prev == player) return;
-        if (prev >= 0 && prev <= 2) hash_key ^= zobrist_at(x, y, prev);
-        if (player >= 0 && player <= 2) hash_key ^= zobrist_at(x, y, player);
-        board[x][y] = player;
-    }
+void GomokuAI::init(int size) {
+    width = size;
+    height = size;
+    board.assign(width * height, 0);
+    DIRS[0] = 1;          // Right
+    DIRS[1] = width;      // Down
+    DIRS[2] = width + 1;  // Diag Down-Right
+    DIRS[3] = width - 1;  // Diag Down-Left
+    
+    min_x = size; max_x = 0;
+    min_y = size; max_y = 0;
+    
+    init_zobrist();
+    hash_key = 0;
+    clear_tt();
+    clear_history();
 }
 
 Point GomokuAI::parse_coordinates(const std::string& s) {
-    size_t commaPos = s.find(',');
-    if (commaPos == std::string::npos) return {-1, -1};
-    try {
-        int x = std::stoi(s.substr(0, commaPos));
-        int y = std::stoi(s.substr(commaPos + 1));
-        return {x, y};
-    } catch (...) {
-        return {-1, -1};
-    }
+    size_t c = s.find(',');
+    if (c == std::string::npos) return {-1, -1};
+    return {std::stoi(s.substr(0, c)), std::stoi(s.substr(c + 1))};
 }
 
-namespace detail {
-
-// Count aligned stones for `player` in one direction (excluding origin), up to 4 steps.
-int count_consecutive(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
-    int count = 0;
-    int w = board.size();
-    int h = board[0].size();
-    for (int i = 1; i < 5; ++i) {
-        int nx = x + dx * i;
-        int ny = y + dy * i;
-        if (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == player) count++;
-        else break;
-    }
-    return count;
-}
-
-// Evaluate the length of a line through (x,y) by looking both directions (includes the move).
-int evaluate_dir(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
-    return 1 + count_consecutive(board, x, y, dx, dy, player) + count_consecutive(board, x, y, -dx, -dy, player);
-}
-
-// Compute max line length through (x,y) for `player` across 4 directions.
-int evaluate_line_local(const std::vector<std::vector<int>>& board, int x, int y, int player) {
-    int max_len = 0;
-    int dirs[4][2] = {{1,0}, {0,1}, {1,1}, {1,-1}};
-    for(auto& d : dirs) {
-        int len = evaluate_dir(board, x, y, d[0], d[1], player);
-        if (len > max_len) max_len = len;
-    }
-    return max_len;
-}
-
-// Aggregated info for a line: stones count and openness at each end.
-struct LineStats {
-    int count;
-    bool open1;
-    bool open2;
-};
-
-// Search bounds for pruning: window around existing stones.
-struct Bounds {
-    int start_x;
-    int end_x;
-    int start_y;
-    int end_y;
-};
-
-struct Move {
-    int x;
-    int y;
-    int score;
-};
-
-// Check if coordinates are inside board limits.
-bool is_inside(const std::vector<std::vector<int>>& board, int x, int y) {
-    return x >= 0 && y >= 0 && x < static_cast<int>(board.size()) && y < static_cast<int>(board[0].size());
-}
-
-// True if no stones are placed.
-bool board_is_empty(const std::vector<std::vector<int>>& board) {
-    for (const auto& row : board) {
-        for (int cell : row) if (cell != 0) return false;
-    }
-    return true;
-}
-
-int count_stones(const std::vector<std::vector<int>>& board) {
-    int stones = 0;
-    for (const auto& row : board) {
-        for (int cell : row) stones += (cell != 0);
-    }
-    return stones;
-}
-
-// Compute a rectangular window covering all stones, expanded by `margin`.
-Bounds compute_bounds(const std::vector<std::vector<int>>& board, int margin) {
-    int w = board.size();
-    int h = board.empty() ? 0 : board[0].size();
-    int min_x = w, max_x = -1, min_y = h, max_y = -1;
-    for (int x = 0; x < w; ++x) {
-        for (int y = 0; y < h; ++y) {
-            if (board[x][y] != 0) {
-                min_x = std::min(min_x, x);
-                max_x = std::max(max_x, x);
-                min_y = std::min(min_y, y);
-                max_y = std::max(max_y, y);
-            }
+void GomokuAI::update_board(int x, int y, int player) {
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+    int idx = y * width + x;
+    
+    if (board[idx] != player) {
+        if (board[idx] != 0) hash_key ^= zobrist_at(idx, board[idx]); 
+        board[idx] = player;
+        if (player != 0) {
+            hash_key ^= zobrist_at(idx, player); 
+            if (x < min_x) min_x = x;
+            if (x > max_x) max_x = x;
+            if (y < min_y) min_y = y;
+            if (y > max_y) max_y = y;
         }
     }
+}
 
-    Bounds b;
-    if (max_x == -1) { // empty board fallback
-        b.start_x = 0; b.end_x = w - 1; b.start_y = 0; b.end_y = h - 1;
-    } else {
-        b.start_x = std::max(0, min_x - margin);
-        b.end_x   = std::min(w - 1, max_x + margin);
-        b.start_y = std::max(0, min_y - margin);
-        b.end_y   = std::min(h - 1, max_y + margin);
+// --- ENGINE ---
+
+bool check_win(const std::vector<int>& board, int idx, int w, int h, int player) {
+    // 4 Directions
+    // We check centered at idx.
+    int x = idx % w;
+    int y = idx / w;
+
+    // Dir 1: Horizontal (1,0)
+    {
+        int count = 1;
+        for (int i = 1; i < 5; ++i) { if (x + i >= w || board[y * w + (x + i)] != player) break; count++; }
+        for (int i = 1; i < 5; ++i) { if (x - i < 0 || board[y * w + (x - i)] != player) break; count++; }
+        if (count >= 5) return true;
     }
-    return b;
-}
-
-Bounds expand_bounds(const Bounds& b, int expand, int width, int height) {
-    Bounds out;
-    out.start_x = std::max(0, b.start_x - expand);
-    out.end_x = std::min(width - 1, b.end_x + expand);
-    out.start_y = std::max(0, b.start_y - expand);
-    out.end_y = std::min(height - 1, b.end_y + expand);
-    return out;
-}
-
-// Side-to-move salt for TT keys (avoid collisions between same position with different side).
-constexpr uint64_t TT_SIDE_P1 = 0xA0761D6478BD642FULL;
-constexpr uint64_t TT_SIDE_P2 = 0xE7037ED1A0B428DBULL;
-
-struct TTEntry {
-    int depth;
-    int value;
-    int best_x;
-    int best_y;
-};
-
-static std::unordered_map<uint64_t, TTEntry> global_tt;
-static Point killer_moves[20][2]; // [depth][slot]
-
-bool has_neighbor(const std::vector<std::vector<int>>& board, int x, int y, int dist) {
-    int w = board.size();
-    int h = board[0].size();
-    int min_x = std::max(0, x - dist);
-    int max_x = std::min(w - 1, x + dist);
-    int min_y = std::max(0, y - dist);
-    int max_y = std::min(h - 1, y + dist);
-
-    for (int i = min_x; i <= max_x; ++i) {
-        for (int j = min_y; j <= max_y; ++j) {
-            if (board[i][j] != 0) return true;
-        }
+    // Dir 2: Vertical (0,1)
+    {
+        int count = 1;
+        for (int i = 1; i < 5; ++i) { if (y + i >= h || board[(y + i) * w + x] != player) break; count++; }
+        for (int i = 1; i < 5; ++i) { if (y - i < 0 || board[(y - i) * w + x] != player) break; count++; }
+        if (count >= 5) return true;
+    }
+    // Dir 3: Diag (1,1)
+    {
+        int count = 1;
+        for (int i = 1; i < 5; ++i) { if (x + i >= w || y + i >= h || board[(y + i) * w + (x + i)] != player) break; count++; }
+        for (int i = 1; i < 5; ++i) { if (x - i < 0 || y - i < 0 || board[(y - i) * w + (x - i)] != player) break; count++; }
+        if (count >= 5) return true;
+    }
+    // Dir 4: Anti-Diag (-1,1)
+    {
+        int count = 1;
+        for (int i = 1; i < 5; ++i) { if (x - i < 0 || y + i >= h || board[(y + i) * w + (x - i)] != player) break; count++; }
+        for (int i = 1; i < 5; ++i) { if (x + i >= w || y - i < 0 || board[(y - i) * w + (x + i)] != player) break; count++; }
+        if (count >= 5) return true;
     }
     return false;
 }
 
-} // namespace detail
+int eval_state(const GomokuAI& ai, int player) {
+    const int W_LIVE_4 = 100000;
+    const int W_DEAD_4 = 2000;
+    const int W_LIVE_3 = 2000;
+    const int W_DEAD_3 = 100;
+    const int W_LIVE_2 = 100;
+    
+    int total_score = 0;
+    
+    int sx = std::max(0, ai.min_x - 1);
+    int ex = std::min(ai.width - 1, ai.max_x + 1);
+    int sy = std::max(0, ai.min_y - 1);
+    int ey = std::min(ai.height - 1, ai.max_y + 1);
 
-namespace {
+    auto eval_line_dir = [&](int cx, int cy, int dx, int dy) -> int {
+        int idx = cy * ai.width + cx;
+        int p = ai.board[idx];
+        if (p == 0) return 0;
+        
+        int px = cx - dx; 
+        int py = cy - dy;
+        bool is_start = true;
+        if (px >= 0 && px < ai.width && py >= 0 && py < ai.height) {
+            if (ai.board[py * ai.width + px] == p) is_start = false;
+        }
+        if (!is_start) return 0;
 
-constexpr int INF = 1'000'000'000;
-constexpr int WIN_SCORE = 900'000'000;
-constexpr int KILLER_SCORE = 10'000'000;
+        int count = 0;
+        int tx = cx;
+        int ty = cy;
+        while (tx >= 0 && tx < ai.width && ty >= 0 && ty < ai.height && ai.board[ty * ai.width + tx] == p) {
+            count++;
+            tx += dx;
+            ty += dy;
+        }
+        
+        bool open_head = false;
+        if (px >= 0 && px < ai.width && py >= 0 && py < ai.height && ai.board[py * ai.width + px] == 0) open_head = true;
+        
+        bool open_tail = false;
+        if (tx >= 0 && tx < ai.width && ty >= 0 && ty < ai.height && ai.board[ty * ai.width + tx] == 0) open_tail = true;
+        
+        int val = 0;
+        if (count >= 5) val = SCORE_WIN;
+        else if (count == 4) {
+            if (open_head && open_tail) val = W_LIVE_4;
+            else if (open_head || open_tail) val = W_DEAD_4;
+        } else if (count == 3) {
+             if (open_head && open_tail) val = W_LIVE_3;
+             else if (open_head || open_tail) val = W_DEAD_3;
+        } else if (count == 2) {
+             if (open_head && open_tail) val = W_LIVE_2;
+        }
 
-inline uint64_t tt_key(uint64_t base, int player_to_move) {
-    return base ^ (player_to_move == 1 ? detail::TT_SIDE_P1 : detail::TT_SIDE_P2);
-}
-
-} // namespace
-
-namespace detail {
-
-// Collect how many aligned stones we would have by playing (x,y) and whether each end stays open.
-LineStats get_line_stats(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
-    int w = board.size();
-    int h = board[0].size();
-
-    int count = 1; // include the stone we are about to play
-    bool open1 = false;
-    bool open2 = false;
-
-    int nx = x + dx;
-    int ny = y + dy;
-    while (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == player) {
-        count++;
-        nx += dx;
-        ny += dy;
-    }
-    if (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == 0) open1 = true;
-
-    nx = x - dx;
-    ny = y - dy;
-    while (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == player) {
-        count++;
-        nx -= dx;
-        ny -= dy;
-    }
-    if (nx >= 0 && nx < w && ny >= 0 && ny < h && board[nx][ny] == 0) open2 = true;
-
-    return {count, open1, open2};
-}
-
-// Score contiguous patterns (open/closed 2/3/4/5) for attack/defense.
-int pattern_score(const LineStats& ls) {
-    if (ls.count >= 5) return 1'000'000'000; // instant win
-    if (ls.count == 4 && ls.open1 && ls.open2) return 200'000; // open four
-    if (ls.count == 4 && (ls.open1 || ls.open2)) return 15'000;  // closed four (Sleeping Four): reduced to avoid bad forcing moves
-    if (ls.count == 3 && ls.open1 && ls.open2) return 120'000; // open three (major threat)
-    if (ls.count == 3 && (ls.open1 || ls.open2)) return 4'000;  // closed three
-    if (ls.count == 2 && ls.open1 && ls.open2) return 800;
-    if (ls.count == 2 && (ls.open1 || ls.open2)) return 150;
-    return (ls.open1 || ls.open2) ? 40 : 10;
-}
-
-// Score split threats (XX.XX, XX.X) requiring a real gap and at least one open end.
-int gapped_threat_score(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
-    auto cell = [&](int offset) {
-        if (offset == 0) return player; // assume we play here
-        int nx = x + offset * dx;
-        int ny = y + offset * dy;
-        if (nx < 0 || nx >= static_cast<int>(board.size()) || ny < 0 || ny >= static_cast<int>(board[0].size())) return -1; // blocked by border
-        return board[nx][ny];
+        return (p == player) ? val : -val;
     };
 
-    int best = 0;
-    for (int start = -4; start <= 0; ++start) {
-        int stones = 0;
-        int segments = 0;
-        int max_seg = 0;
-        int empties = 0;
-        bool blocked = false;
-        int cur = 0;
-
-        for (int i = 0; i < 5; ++i) {
-            int v = cell(start + i);
-            if (v == player) {
-                stones++;
-                cur++;
-            } else if (v == 0) {
-                empties++;
-                if (cur > 0) {
-                    segments++;
-                    if (cur > max_seg) max_seg = cur;
-                    cur = 0;
-                }
-            } else { // opponent or border
-                blocked = true;
-                if (cur > 0) {
-                    segments++;
-                    if (cur > max_seg) max_seg = cur;
-                    cur = 0;
-                }
-            }
-        }
-        if (cur > 0) {
-            segments++;
-            if (cur > max_seg) max_seg = cur;
-        }
-
-        if (blocked) continue;          // invalid window (opponent/border)
-        if (empties == 0) continue;     // no gap present: ignore, avoids false positives when the gap is déjà occupée
-
-        // Require at least one open end outside the 5-cell window; if both ends are border/our stones, the threat is not urgent.
-        auto open_end = [&](int offset) {
-            int nx = x + offset * dx;
-            int ny = y + offset * dy;
-            if (nx < 0 || nx >= static_cast<int>(board.size()) || ny < 0 || ny >= static_cast<int>(board[0].size())) return false; // border counts as closed
-            return board[nx][ny] == 0;
-        };
-        bool has_open_end = open_end(start - 1) || open_end(start + 5);
-        if (!has_open_end) continue;
-
-        // Reward non-contiguous threats that rely on at least one real gap.
-        if (stones == 4 && max_seg <= 2 && segments >= 2) {
-            best = std::max(best, 160'000); // XX.XX style hidden four (almost as good as Open Four)
-        } else if (stones == 3 && max_seg <= 2 && segments >= 2) {
-            best = std::max(best, 100'000); // XX.X or X.XX split three (almost as good as Open Three)
-        }
+    for (int y = sy; y <= ey; ++y) {
+        for (int x = sx; x <= ex; ++x) total_score += eval_line_dir(x, y, 1, 0);
     }
-    return best;
+    for (int y = sy; y <= ey; ++y) {
+        for (int x = sx; x <= ex; ++x) total_score += eval_line_dir(x, y, 0, 1);
+    }
+    for (int y = sy; y <= ey; ++y) {
+        for (int x = sx; x <= ex; ++x) total_score += eval_line_dir(x, y, 1, 1);
+    }
+    for (int y = sy; y <= ey; ++y) {
+        for (int x = sx; x <= ex; ++x) total_score += eval_line_dir(x, y, -1, 1);
+    }
+    
+    return total_score;
 }
 
-// Encourage distant, open-ended pairings like X000.X that keep both ends flexible and can mislead opponents.
-int spaced_extension_bonus(const std::vector<std::vector<int>>& board, int x, int y, int dx, int dy, int player) {
-    int best = 0;
+int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
+    if ((ply & 127) == 0 && check_time()) return 0;
 
-    auto scan_dir = [&](int step_dir) {
-        // Keep this coherent with our typical search window (margin 2/3): gap=4 rarely falls inside bounds.
-        for (int gap = 3; gap <= 3; ++gap) { // 3 steps away: X00X
-            int nx = x + step_dir * gap * dx;
-            int ny = y + step_dir * gap * dy;
-            if (!is_inside(board, nx, ny)) continue;
-            if (board[nx][ny] != player) continue;
+    int opponent = (player == 1) ? 2 : 1;
+    uint64_t key = ai.get_hash_key();
+    int tt_idx = key % TT_SIZE;
+    TTEntry& tte = TT[tt_idx];
 
-            bool clear = true;
-            for (int i = 1; i < gap; ++i) {
-                int cx = x + step_dir * i * dx;
-                int cy = y + step_dir * i * dy;
-                if (!is_inside(board, cx, cy) || board[cx][cy] != 0) { clear = false; break; }
-            }
-            if (!clear) continue;
-
-            bool open_far = is_inside(board, nx + step_dir * dx, ny + step_dir * dy) && board[nx + step_dir * dx][ny + step_dir * dy] == 0;
-            bool open_near = is_inside(board, x - step_dir * dx, y - step_dir * dy) && board[x - step_dir * dx][y - step_dir * dy] == 0;
-
-            // Keep the far end open to really form X000.X; otherwise it's just a buried gap inside our own chain.
-            if (!open_far) continue;
-
-            int base = 250;
-            if (open_near) base += 50; // extra value when both ends stay open
-            best = std::max(best, base);
-        }
-    };
-
-    scan_dir(1);
-    scan_dir(-1);
-    return best;
-}
-
-// Find a move that guarantees an immediate win on the next turn, regardless of opponent reply (shallow threat search).
-Point threat_search_forced_win(std::vector<std::vector<int>>& board, const Bounds& bounds, int margin, int me, int opponent, int width, int height) {
-    (void)margin;
-    (void)width;
-    (void)height;
-    auto would_win = [&](int px, int py, int player) {
-        board[px][py] = player;
-        bool win = (evaluate_line_local(board, px, py, player) >= 5);
-        board[px][py] = 0;
-        return win;
-    };
-
-    for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
-        for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-
-            if (would_win(x, y, me)) return Point{x, y};
-
-            board[x][y] = me;
-
-            bool forced = true;
-
-            // IMPORTANT: Do not restrict opponent replies to a tiny local window.
-            // Doing so creates false positives ("forced" sequences) and makes the AI over-defend.
-            // Using the global search bounds keeps it fast while capturing key defenses/blocks.
-            for (int ox = bounds.start_x; ox <= bounds.end_x && forced; ++ox) {
-                for (int oy = bounds.start_y; oy <= bounds.end_y && forced; ++oy) {
-                    if (board[ox][oy] != 0) continue;
-
-                    if (would_win(ox, oy, opponent)) { forced = false; break; }
-
-                    board[ox][oy] = opponent;
-                    bool can_reply_win = false;
-
-                    // Same rationale: our winning reply might be slightly outside a local window.
-                    for (int rx = bounds.start_x; rx <= bounds.end_x && !can_reply_win; ++rx) {
-                        for (int ry = bounds.start_y; ry <= bounds.end_y && !can_reply_win; ++ry) {
-                            if (board[rx][ry] != 0) continue;
-                            if (would_win(rx, ry, me)) {
-                                can_reply_win = true;
-                            }
-                        }
-                    }
-                    board[ox][oy] = 0;
-                    if (!can_reply_win) forced = false;
-                }
-            }
-
-            board[x][y] = 0;
-            if (forced) return Point{x, y};
-        }
-    }
-    return Point{-1, -1};
-}
-
-} // namespace detail
-
-namespace {
-
-static std::vector<detail::Move> generate_candidates(
-    GomokuAI& ai,
-    const detail::Bounds& bounds,
-    int player,
-    int opponent,
-    int max_moves,
-    int ply)
-{
-    std::vector<detail::Move> moves;
-    moves.reserve(static_cast<size_t>(max_moves) * 2ULL);
-
-    int k_idx = (ply >= 0 && ply < 20) ? ply : 0;
-    Point k1 = detail::killer_moves[k_idx][0];
-    Point k2 = detail::killer_moves[k_idx][1];
-
-    for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
-        for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
-            if (ai.board[x][y] != 0) continue;
-
-            // Optimization: Only consider moves within range 2 of existing stones
-            if (!detail::has_neighbor(ai.board, x, y, 2)) continue;
-
-            int s = ai.evaluate_position(x, y, player, opponent);
-
-            // Killer Heuristic Bonus
-            if (x == k1.x && y == k1.y) s += KILLER_SCORE;
-            else if (x == k2.x && y == k2.y) s += KILLER_SCORE;
-
-            moves.push_back({x, y, s});
-        }
-    }
-
-    std::sort(moves.begin(), moves.end(), [](const detail::Move& a, const detail::Move& b) {
-        return a.score > b.score;
-    });
-
-    if (static_cast<int>(moves.size()) > max_moves) moves.resize(static_cast<size_t>(max_moves));
-    return moves;
-}
-
-static int get_max_move_score(GomokuAI& ai, const detail::Bounds& bounds, int player, int opponent) {
-    int max_s = 0;
-    for (int x = bounds.start_x; x <= bounds.end_x; ++x) {
-        for (int y = bounds.start_y; y <= bounds.end_y; ++y) {
-            if (ai.board[x][y] != 0) continue;
-            int s = ai.evaluate_position(x, y, player, opponent);
-            if (s > max_s) max_s = s;
-        }
-    }
-    return max_s;
-}
-
-static int evaluate_state_fixed(
-    GomokuAI& ai,
-    const detail::Bounds& bounds,
-    int root_me,
-    int root_opp,
-    int player_to_move,
-    int ply)
-{
-    // Cheap evaluation: best move potential for player minus best move potential for opponent.
-    int best_self = get_max_move_score(ai, bounds, root_me, root_opp);
-    int best_opp = get_max_move_score(ai, bounds, root_opp, root_me);
-
-    // If opponent has a winning move, we are in trouble.
-    // Use ply to keep win/loss scores consistent with dynamic search.
-    if (best_opp >= WIN_SCORE) {
-        return -(WIN_SCORE - ply);
-    }
-    if (best_self >= WIN_SCORE) {
-        return (WIN_SCORE - ply);
-    }
-
-    // Tempo heuristic: The player to move gets to execute their threat.
-    if (player_to_move == root_opp) {
-        if (best_opp >= 195'000) return -850'000'000; // Almost certain loss
-        return best_self - (best_opp * 2); 
-    } else {
-        // Our turn
-        if (best_opp >= 195'000) return -850'000'000; // Must block!
-        if (best_self >= 150'000) return 850'000'000; // Almost certain win
-        return (best_self * 2) - best_opp;
-    }
-}
-
-static int negamax(
-    GomokuAI& ai,
-    const detail::Bounds& bounds,
-    int depth,
-    int alpha,
-    int beta,
-    int player_to_move,
-    int opponent,
-    int root_me,
-    int root_opp,
-    const std::chrono::steady_clock::time_point& deadline,
-    bool& time_up,
-    int ply)
-{
-    if (time_up || std::chrono::steady_clock::now() >= deadline) {
-        time_up = true;
-        return 0;
+    if (tte.key == key && tte.depth >= depth) {
+        if (tte.flag == 0) return tte.value; 
+        if (tte.flag == 1 && tte.value >= beta) return tte.value; 
+        if (tte.flag == 2 && tte.value <= alpha) return tte.value; 
     }
 
     if (depth == 0) {
-        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp, player_to_move, ply);
-        int color = (player_to_move == root_me) ? 1 : -1;
-        return color * eval;
+        return eval_state(ai, player);
     }
 
-    uint64_t key = tt_key(ai.get_hash_key(), player_to_move);
-    auto it = detail::global_tt.find(key);
-    if (it != detail::global_tt.end() && it->second.depth >= depth) {
-        return it->second.value;
-    }
+    std::vector<std::pair<int, int>> moves;
+    moves.reserve(40);
+    
+    int sx = std::max(0, ai.min_x - 2);
+    int ex = std::min(ai.width - 1, ai.max_x + 2);
+    int sy = std::max(0, ai.min_y - 2);
+    int ey = std::min(ai.height - 1, ai.max_y + 2);
 
-    int best_value = -INF;
-    int best_x = -1;
-    int best_y = -1;
-
-    auto moves = generate_candidates(ai, bounds, player_to_move, opponent, 24, ply);
-    if (moves.empty()) {
-        int eval = evaluate_state_fixed(ai, bounds, root_me, root_opp, player_to_move, ply);
-        int color = (player_to_move == root_me) ? 1 : -1;
-        return color * eval;
+    int w = ai.width;
+    
+    for (int y = sy; y <= ey; ++y) {
+        for (int x = sx; x <= ex; ++x) {
+            int idx = y * w + x;
+            if (ai.board[idx] != 0) continue;
+            
+            bool rel = false;
+            for (int dy=-2; dy<=2; ++dy) {
+                for (int dx=-2; dx<=2; ++dx) {
+                     if (dx==0 && dy==0) continue;
+                     int nx = x+dx; int ny = y+dy;
+                     if (nx>=0 && nx<ai.width && ny>=0 && ny<ai.height) {
+                         if (ai.board[ny*w+nx] != 0) { rel = true; break; }
+                     }
+                }
+                if (rel) break;
+            }
+            
+            if (rel) {
+                int score = 0;
+                if (idx == tte.best_move_idx) score += 1000000; 
+                if (killer_moves[ply][0] == idx) score += 900000;
+                else if (killer_moves[ply][1] == idx) score += 800000;
+                score += history_moves[player][idx];
+                int dist = std::abs(x - ai.width/2) + std::abs(y - ai.height/2);
+                score -= dist;
+                moves.push_back({score, idx});
+            }
+        }
     }
+    
+    if (moves.empty()) return eval_state(ai, player);
+
+    std::sort(moves.rbegin(), moves.rend());
+
+    int best_val = -INF;
+    int best_move = -1;
+    int type = 2; // Upperbound
 
     for (const auto& mv : moves) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            time_up = true;
-            break;
+        int idx = mv.second;
+        
+        ai.update_board(idx % w, idx / w, player);
+        
+        if (check_win(ai.board, idx, w, ai.height, player)) {
+            ai.update_board(idx % w, idx / w, 0); 
+            best_val = SCORE_WIN - ply; 
+            best_move = idx;
+            type = 0;
+            alpha = best_val;
+            break; 
         }
 
-        // Apply move
-        ai.update_board(mv.x, mv.y, player_to_move);
+        int val = -negamax(ai, depth - 1, -beta, -alpha, opponent, ply + 1);
+        
+        ai.update_board(idx % w, idx / w, 0);
 
-        int value;
-        if (detail::evaluate_line_local(ai.board, mv.x, mv.y, player_to_move) >= 5) {
-            value = WIN_SCORE - (5 - depth);
-        } else {
-            value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, player_to_move, root_me, root_opp, deadline, time_up, ply + 1);
+        if (time_out_flag) return 0;
+
+        if (val > best_val) {
+            best_val = val;
+            best_move = idx;
         }
-
-        // Undo
-        ai.update_board(mv.x, mv.y, 0);
-        if (time_up) break;
-
-        if (value > best_value) {
-            best_value = value;
-            best_x = mv.x;
-            best_y = mv.y;
-        }
-        alpha = std::max(alpha, value);
+        
+        alpha = std::max(alpha, best_val);
         if (alpha >= beta) {
-            // Beta Cutoff -> Store Killer Move
-            // Store at current ply index (safe range check implicit if ply < 20)
-            if (ply < 20) {
-                // If it's different from the first killer move, push it
-                if (detail::killer_moves[ply][0].x != mv.x || detail::killer_moves[ply][0].y != mv.y) {
-                    detail::killer_moves[ply][1] = detail::killer_moves[ply][0];
-                    detail::killer_moves[ply][0] = {mv.x, mv.y};
+            type = 1; // Lowerbound
+            if (ply < 100) {
+                if (killer_moves[ply][0] != idx) {
+                    killer_moves[ply][1] = killer_moves[ply][0];
+                    killer_moves[ply][0] = idx;
                 }
             }
+            history_moves[player][idx] += depth * depth;
             break;
         }
     }
 
-    if (!time_up && best_x != -1) {
-        detail::global_tt[key] = detail::TTEntry{depth, best_value, best_x, best_y};
-    }
-    return best_value;
-}
-
-static Point search_best_move(
-    GomokuAI& ai,
-    const detail::Bounds& base_bounds,
-    int me,
-    int opponent,
-    int time_limit_ms)
-{
-    detail::Bounds bounds = detail::expand_bounds(base_bounds, 1, ai.width, ai.height);
-    auto start = std::chrono::steady_clock::now();
-    auto deadline = start + std::chrono::milliseconds(time_limit_ms);
-
-    // Clear Killer Moves for this new search to avoid history bias from previous turns
-    for(int i=0; i<20; ++i) {
-        detail::killer_moves[i][0] = {-1, -1};
-        detail::killer_moves[i][1] = {-1, -1};
+    if (!time_out_flag) {
+        tte.key = key;
+        tte.depth = depth;
+        tte.value = best_val;
+        tte.flag = type;
+        tte.best_move_idx = best_move;
     }
 
-    // Root moves: pass 0 for depth, though killer moves at root are less critical as we sort by PV.
-    auto root_moves = generate_candidates(ai, bounds, me, opponent, 24, 0);
-    if (root_moves.empty()) return {-1, -1};
-
-    Point best = {root_moves.front().x, root_moves.front().y};
-    int best_val = -INF;
-
-    bool time_up = false;
-    // Go deeper than 5! The time check will stop us anyway.
-    // 20 is the max depth supported by our killer_moves array.
-    for (int depth = 1; depth < 20; ++depth) {
-        if (std::chrono::steady_clock::now() >= deadline) break;
-
-        int alpha = -INF;
-        int beta = INF;
-        int local_best_val = -INF;
-        Point local_best = best;
-
-        // Try principal variation move first (from previous iteration)
-        std::stable_sort(root_moves.begin(), root_moves.end(), [&](const detail::Move& a, const detail::Move& b) {
-            if (a.x == best.x && a.y == best.y) return true;
-            if (b.x == best.x && b.y == best.y) return false;
-            return a.score > b.score;
-        });
-
-        for (const auto& mv : root_moves) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                time_up = true;
-                break;
-            }
-
-            ai.update_board(mv.x, mv.y, me);
-
-            int value;
-            if (detail::evaluate_line_local(ai.board, mv.x, mv.y, me) >= 5) {
-                value = WIN_SCORE;
-            } else {
-                value = -negamax(ai, bounds, depth - 1, -beta, -alpha, opponent, me, me, opponent, deadline, time_up, 1);
-            }
-
-            ai.update_board(mv.x, mv.y, 0);
-            if (time_up) break;
-
-            if (value > local_best_val) {
-                local_best_val = value;
-                local_best = {mv.x, mv.y};
-            }
-            alpha = std::max(alpha, value);
-            // DEBUG: Print root move scores
-            // std::cout << "Move (" << mv.x << "," << mv.y << ") Depth " << depth << " Val: " << value << std::endl;
-
-            // Optimization: If we found a winning move, take it immediately.
-            if (value >= WIN_SCORE - 100) {
-                return local_best;
-            }
-        }
-
-        if (!time_up) {
-            best = local_best;
-            best_val = local_best_val;
-        } else {
-            break;
-        }
-    }
-
-    (void)best_val;
-    return best;
-}
-
-} // namespace
-
-int GomokuAI::evaluate_position(int x, int y, int me, int opponent) {
-    // Heuristic mix: attack + defense + fork bonus + proximity + center bias.
-    static const std::array<std::array<int,2>,4> dirs = {std::array<int,2>{1,0}, {0,1}, {1,1}, {1,-1}};
-
-    int dir_attack_scores[4] = {0,0,0,0};
-    int attack_total = 0;
-    int defense_total = 0;
-    bool meaningful_attack = false;
-    bool meaningful_defense = false;
-
-    // Attack: how strong we become if we play here.
-    int threat_dirs = 0; // count directions that create an immediate threat (open three or better)
-    for (int i = 0; i < 4; ++i) {
-        auto& d = dirs[i];
-        detail::LineStats ls = detail::get_line_stats(board, x, y, d[0], d[1], me);
-        int pattern = detail::pattern_score(ls);
-        int gapped = detail::gapped_threat_score(board, x, y, d[0], d[1], me);
-        int spaced = detail::spaced_extension_bonus(board, x, y, d[0], d[1], me);
-
-        int s = pattern + gapped + spaced;
-
-        // Track how many directions yield at least an open three / split three (for double-threat bonus).
-        // Thresholds increased to avoid counting Sleeping Fours (15k) as threats.
-        if (pattern >= 50'000 || gapped >= 80'000) {
-            threat_dirs++;
-        }
-
-        // "Sleeping Four" penalty logic is now handled by the low score in pattern_score (15k).
-        // We no longer need explicit logic to downweight it here unless it's redundant.
-
-        if (!meaningful_attack && (pattern >= 2'000 || gapped > 0 || spaced > 0)) {
-            meaningful_attack = true;
-        }
-        dir_attack_scores[i] = s;
-        attack_total += s;
-    }
-
-    // Defense: how much danger we neutralize from the opponent by occupying this point.
-    int opp_threat_dirs = 0;
-    for (auto& d : dirs) {
-        detail::LineStats ls_opp = detail::get_line_stats(board, x, y, d[0], d[1], opponent);
-        int p = detail::pattern_score(ls_opp);
-        int g = detail::gapped_threat_score(board, x, y, d[0], d[1], opponent);
-
-        // Count directions where opponent has at least an Open Three or similar strong threat
-        if (p >= 50'000 || g >= 80'000) {
-            opp_threat_dirs++;
-        }
-
-        // A blocking move both prevents their pattern and often creates ours; keep weight high.
-        defense_total += p * 9 / 10;
-        defense_total += g * 8 / 10;
-        if (!meaningful_defense && (p >= 2'000 || g > 0)) {
-            meaningful_defense = true;
-        }
-    }
-    // Block Opponent Fork: If opponent has multiple strong threats here, blocking is mandatory-like.
-    if (opp_threat_dirs >= 2) {
-        defense_total += 50'000;
-    }
-
-    // Threat multiplicity: bonus when the move is strong in two directions (fork potential).
-    std::array<int,4> tmp = {dir_attack_scores[0], dir_attack_scores[1], dir_attack_scores[2], dir_attack_scores[3]};
-    std::sort(tmp.begin(), tmp.end(), std::greater<int>());
-    int fork_bonus = (tmp[0] + tmp[1]) / 3; // lighter than raw sum to avoid overpowering
-    int extra_score = fork_bonus;
-
-    // Bonus for creating multiple immediate threats (double open three / split threat).
-    if (threat_dirs >= 2) {
-        extra_score += 40'000;
-    } else if (threat_dirs == 1) {
-        extra_score += 8'000;
-    }
-
-    // Proximity: avoid isolated plays; prefer to stay within two cells of any stone.
-    int neighbor_score = 0;
-    for (int dx = -2; dx <= 2; ++dx) {
-        for (int dy = -2; dy <= 2; ++dy) {
-            if (dx == 0 && dy == 0) continue;
-            int nx = x + dx;
-            int ny = y + dy;
-            if (nx >= 0 && nx < width && ny >= 0 && ny < height && board[nx][ny] != 0) {
-                int dist = std::abs(dx) + std::abs(dy);
-                neighbor_score += (5 - dist); // closer neighbors give more weight
-            }
-        }
-    }
-    neighbor_score = std::min(neighbor_score, 12);
-    extra_score += neighbor_score * 10;
-
-    // Centrality heuristic: Playing near the center offers more growth potential in all directions.
-    // Scale down this effect as the game progresses.
-    int stones = detail::count_stones(board);
-    int cx = width / 2;
-    int cy = height / 2;
-    int dist = std::abs(x - cx) + std::abs(y - cy);
-    int center_weight = (stones < 6 ? 120 : 40);
-    int center_bonus = center_weight - dist * 4;
-    if (center_bonus > 0) extra_score += center_bonus;
-
-    // If the move neither creates nor blocks at least a (closed) three or gapped threat,
-    // downweight soft bonuses so we avoid neutral filler moves.
-    if (!meaningful_attack && !meaningful_defense) {
-        extra_score /= 2;
-    }
-
-    return attack_total + defense_total + extra_score;
-}
-
-int GomokuAI::evaluate_line(int x, int y, int player) {
-    return detail::evaluate_line_local(board, x, y, player);
+    return best_val;
 }
 
 Point GomokuAI::find_best_move(int time_limit) {
-    // Main policy: center on empty board, forced-win scan, then heuristic best.
-    int best_score = -1;
-    Point best_move = {-1, -1};
-
-    // Clear Transposition Table for each new move to avoid stale data/collisions
-    detail::global_tt.clear();
-
-    // Strategy: If the board is empty, the center is statistically the best start.
-    if (detail::board_is_empty(board)) return {width/2, height/2};
-
-    // Player IDs are fixed by protocol: we are 1, opponent is 2.
-    const int me = 1;
-    const int opponent = 2;
-
-    // Use a slightly larger margin on larger boards to not miss distant threats.
-    int margin = 4;
-    detail::Bounds b = detail::compute_bounds(board, margin);
-    detail::Bounds guard_b = detail::expand_bounds(b, 1, width, height);
-
-    // Mandatory tactics first: simple instant win/loss check.
-    // We keep these for safety, but deeper threats are handled by search_best_move.
-
-    // 1) Win now
-    for (int x = b.start_x; x <= b.end_x; ++x) {
-        for (int y = b.start_y; y <= b.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-            if (evaluate_line(x, y, me) >= 5) return {x, y};
-        }
+    start_time = std::chrono::steady_clock::now();
+    time_limit_ms = time_limit - 100; 
+    time_out_flag = false;
+    
+    int center = (height/2) * width + (width/2);
+    if (board[center] == 0) {
+        bool empty = true;
+        for (int c : board) if(c != 0) { empty = false; break; }
+        if (empty) return {width/2, height/2};
     }
-
-    // 2) Block opponent win now
-    for (int x = b.start_x; x <= b.end_x; ++x) {
-        for (int y = b.start_y; y <= b.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-            if (evaluate_line(x, y, opponent) >= 5) return {x, y};
-        }
-    }
-
-    // Main search: iterative-deepening alpha-beta search (time-bounded).
-    if (detail::count_stones(board) >= 2) {
-        // Reserve a larger safety margin (200ms) to ensure we output before timeout on slow servers.
-        int search_time = std::max(50, time_limit - 200);
-        Point p = search_best_move(*this, b, me, opponent, search_time);
-        if (p.x != -1) return p;
-    }
-
-    for (int x = b.start_x; x <= b.end_x; ++x) {
-        for (int y = b.start_y; y <= b.end_y; ++y) {
-            if (board[x][y] != 0) continue;
-
-            int score = evaluate_position(x, y, me, opponent);
-
-            // Tactical guard: avoid playing a move that allows an immediate opponent win.
-            // This also helps when bounds are tight and a winning reply is just outside b.
-            board[x][y] = me;
-            bool gives_immediate_win = false;
-            for (int ox = guard_b.start_x; ox <= guard_b.end_x && !gives_immediate_win; ++ox) {
-                for (int oy = guard_b.start_y; oy <= guard_b.end_y && !gives_immediate_win; ++oy) {
-                    if (board[ox][oy] != 0) continue;
-                    if (detail::evaluate_line_local(board, ox, oy, opponent) >= 5) {
-                        gives_immediate_win = true;
-                    }
-                }
-            }
-            board[x][y] = 0;
-            if (gives_immediate_win) score -= 500'000;
-
-            if (score > best_score) {
-                best_score = score;
-                best_move = {x, y};
-            }
-        }
-    }
-
-    // Fallback: play closest to center if nothing else is chosen.
-    if (best_move.x == -1) {
-        int min_dist = 10000;
-        for (int x = 0; x < width; ++x) {
-            for (int y = 0; y < height; ++y) {
-                if (board[x][y] == 0) {
-                    int dist = std::abs(x - width/2) + std::abs(y - height/2);
-                    if (dist < min_dist) {
-                        min_dist = dist;
-                        best_move = {x, y};
-                    }
+    
+    Point best = {-1, -1};
+    int max_depth = 20;
+    
+    for (int depth = 1; depth <= max_depth; ++depth) {
+        int alpha = -INF;
+        int beta = INF;
+        
+        int best_val = -INF;
+        int current_best_idx = -1;
+        
+        std::vector<std::pair<int, int>> moves;
+        int sx = std::max(0, min_x - 2); int ex = std::min(width - 1, max_x + 2);
+        int sy = std::max(0, min_y - 2); int ey = std::min(height - 1, max_y + 2);
+        int w = width;
+        for (int y = sy; y <= ey; ++y) {
+            for (int x = sx; x <= ex; ++x) {
+                int idx = y * w + x;
+                if (board[idx] != 0) continue;
+                bool rel = false;
+                for (int dy=-2; dy<=2; ++dy) { for (int dx=-2; dx<=2; ++dx) {
+                     if (dx==0 && dy==0) continue;
+                     int nx = x+dx; int ny = y+dy;
+                     if (nx>=0 && nx<width && ny>=0 && ny<height && board[ny*w+nx] != 0) { rel = true; break; }
+                }}
+                if (rel) {
+                    int score = 0;
+                    if (depth > 1 && best.x != -1 && (y*w+x) == (best.y*width + best.x)) score += 10000000;
+                    score += history_moves[1][idx];
+                    moves.push_back({score, idx});
                 }
             }
         }
-    }
+        std::sort(moves.rbegin(), moves.rend());
+        
+        if (moves.empty()) {
+             for(int i=0; i<width*height; ++i) if(board[i]==0) return {i%width, i/width};
+        }
 
-    return best_move;
-}
-void GomokuAI::init(int size) {
-    width = size;
-    height = size;
-    board.assign(width, std::vector<int>(height, 0));
-    init_zobrist();
-    hash_key = 0;
-    detail::global_tt.clear();
-    detail::global_tt.reserve(200000);
-    // Clear killer moves
-    for(int i=0; i<20; ++i) {
-        detail::killer_moves[i][0] = {-1, -1};
-        detail::killer_moves[i][1] = {-1, -1};
+        for (const auto& mv : moves) {
+            int idx = mv.second;
+            update_board(idx % w, idx / w, 1);
+            
+            if (check_win(board, idx, w, height, 1)) {
+                 update_board(idx % w, idx / w, 0);
+                 return {idx % width, idx / width}; 
+            }
+            
+            int val = -negamax(*this, depth - 1, -beta, -alpha, 2, 1);
+            
+            update_board(idx % w, idx / w, 0);
+            
+            if (time_out_flag) break;
+            
+            if (val > best_val) {
+                best_val = val;
+                current_best_idx = idx;
+            }
+            alpha = std::max(alpha, best_val);
+        }
+
+        if (time_out_flag) break;
+        
+        if (current_best_idx != -1) {
+            best = {current_best_idx % width, current_best_idx / width};
+            if (best_val >= SCORE_WIN - 100) return best;
+        }
     }
+    
+    return best;
 }

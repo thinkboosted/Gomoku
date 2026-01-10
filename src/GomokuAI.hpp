@@ -20,16 +20,15 @@ public:
 
     int width;
     int height;
-    std::vector<std::vector<int>> board; 
+    std::vector<int> board; // 1D array: board[y * width + x]
 
-    // Heuristic Evaluation Methods
-    int evaluate_position(int x, int y, int me, int opponent);
-    int evaluate_line(int x, int y, int player);
+    // Active bounds for optimization
+    int min_x, max_x, min_y, max_y;
 
 private:
     uint64_t hash_key = 0;
-    std::vector<uint64_t> zobrist; // width * height * 3 (player 0..2)
+    std::vector<uint64_t> zobrist;
 
     void init_zobrist();
-    uint64_t zobrist_at(int x, int y, int player) const;
+    uint64_t zobrist_at(int idx, int player) const;
 };

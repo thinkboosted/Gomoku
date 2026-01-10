@@ -447,6 +447,33 @@ Point GomokuAI::find_best_move(int time_limit) {
         if (empty) return {width/2, height/2};
     }
 
+    // --- Tactical pre-pass: win-now or block-now ---
+    auto would_win = [&](int idx, int player) {
+        update_board(idx % width, idx / width, player);
+        bool win = check_win(board, idx, width, height, player);
+        update_board(idx % width, idx / width, 0);
+        return win;
+    };
+
+    int margin = 2;
+    int sx_t = std::max(0, min_x - margin);
+    int ex_t = std::min(width - 1, max_x + margin);
+    int sy_t = std::max(0, min_y - margin);
+    int ey_t = std::min(height - 1, max_y + margin);
+
+    for (int y = sy_t; y <= ey_t; ++y) {
+        for (int x = sx_t; x <= ex_t; ++x) {
+            int idx = y * width + x;
+            if (board[idx] != 0) continue;
+
+            // 1) Immediate win for us.
+            if (would_win(idx, 1)) return {x, y};
+
+            // 2) Immediate block: if opponent would win by playing here.
+            if (would_win(idx, 2)) return {x, y};
+        }
+    }
+
     Point best = {-1, -1};
     Point last_completed_best = best;
     int max_depth = 20;

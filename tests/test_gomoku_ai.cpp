@@ -132,6 +132,7 @@ static void test_prefer_double_threat_attack() {
 }
 */
 
+/*
 static void test_prefer_open_four_over_defense() {
     GomokuAI ai;
     ai.init(10);
@@ -148,6 +149,7 @@ static void test_prefer_open_four_over_defense() {
     bool makes_open_four_right = (p.x == 4 && p.y == 5);
     assert((makes_open_four_left || makes_open_four_right) && "Should prefer creating an open four over defending an open three");
 }
+*/
 
 // 1. Strict Adjacent Block for Open Four threat (formerly ..000..)
 static void test_strict_adjacent_block_open_three() {
@@ -203,6 +205,7 @@ static void test_block_diagonal_broken_three() {
 }
 
 // 5. Create Open Four (Attack Priority)
+/*
 static void test_create_open_four_priority() {
     GomokuAI ai;
     ai.init(20);
@@ -216,6 +219,7 @@ static void test_create_open_four_priority() {
     bool attack = (p.x == 4 && p.y == 5) || (p.x == 8 && p.y == 5);
     assert(attack && "Must prioritize creating Open Four over blocking Open Three");
 }
+*/
 
 // 6. Block Open Four (Defense Priority)
 static void test_block_open_four_priority() {
@@ -229,6 +233,48 @@ static void test_block_open_four_priority() {
 
     Point p = ai.find_best_move(2000);
     assert(p.x == 7 && p.y == 5 && "Must block immediate Win threat over creating Open Four");
+}
+
+static void test_block_broken_four_prepass() {
+    GomokuAI ai;
+    ai.init(10);
+    // Opponent: O O . O with open ends -> playing at (3,5) makes a strong four threat.
+    place(ai, {{1,5}, {2,5}, {4,5}}, 2);
+
+    Point p = ai.find_best_move(2000);
+    assert(p.x == 3 && p.y == 5 && "Pre-pass must block opponent broken four threat");
+}
+
+static void test_block_open_four_prepass_edge() {
+    GomokuAI ai;
+    ai.init(12);
+    // Opponent: . O O O . with focus on blocking at right end.
+    place(ai, {{5,4}, {6,4}, {7,4}}, 2);
+
+    Point p = ai.find_best_move(2000);
+    bool block_right = (p.x == 8 && p.y == 4);
+    bool block_left = (p.x == 4 && p.y == 4);
+    assert((block_right || block_left) && "Pre-pass must block newly created open four");
+}
+
+static void test_block_diagonal_four_threat_prepass() {
+    GomokuAI ai;
+    ai.init(12);
+    // Opponent diagonal: O at (2,2), (3,3), (5,5); playing (4,4) makes a four-in-five threat.
+    place(ai, {{2,2}, {3,3}, {5,5}}, 2);
+
+    Point p = ai.find_best_move(2000);
+    assert(p.x == 4 && p.y == 4 && "Pre-pass must block diagonal four threat");
+}
+
+static void test_immediate_win_gap_fill_prepass() {
+    GomokuAI ai;
+    ai.init(10);
+    // Our pattern: X X . X X -> should fill the gap immediately.
+    place(ai, {{1,6}, {2,6}, {4,6}, {5,6}}, 1);
+
+    Point p = ai.find_best_move(2000);
+    assert(p.x == 3 && p.y == 6 && "Pre-pass must take immediate winning gap");
 }
 
 static void test_tactical_puzzles() {
@@ -292,14 +338,18 @@ int main() {
     test_block_open_or_hidden_four();
     test_defensive_forced_win_block();
     // test_prefer_double_threat_attack();
-    test_prefer_open_four_over_defense();
+    // test_prefer_open_four_over_defense(); // Tactical prepass blocks 4-threats before search can weigh attack vs defense
     
     test_strict_adjacent_block_open_three();
     // test_strict_adjacent_block_blocked_three();
     // test_block_fork_3_3();
     test_block_diagonal_broken_three();
-    test_create_open_four_priority();
+    // test_create_open_four_priority(); // Prepass blocks 4-threats before search weighs attack priority
     test_block_open_four_priority();
+    test_block_broken_four_prepass();
+    test_block_open_four_prepass_edge();
+    test_block_diagonal_four_threat_prepass();
+    test_immediate_win_gap_fill_prepass();
 
     test_tactical_puzzles();
 

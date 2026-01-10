@@ -460,31 +460,39 @@ Point GomokuAI::find_best_move(int time_limit) {
         int y = idx / width;
         update_board(x, y, player);
         bool threat = false;
+        
         for (int d = 0; d < 4 && !threat; ++d) {
             int dx = (d == 0) ? 1 : (d == 1) ? 0 : (d == 2) ? 1 : -1;
             int dy = (d == 0) ? 0 : (d == 1) ? 1 : 1;
 
-            // Sliding window of length 5 along the line crossing (x,y)
-            for (int offset = -4; offset <= 0 && !threat; ++offset) {
-                int stones = 0;
-                int empties = 0;
-                bool inside = true;
-                for (int k = 0; k < 5; ++k) {
-                    int nx = x + (offset + k) * dx;
-                    int ny = y + (offset + k) * dy;
-                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) { inside = false; break; }
-                    int cell = board[ny * width + nx];
-                    if (cell == player) stones++;
-                    else if (cell == 0) empties++;
-                }
-                if (!inside) continue;
-                // A window with 4 stones and 1 empty is a broken/closed/open four worth blocking.
-                if (stones == 4 && empties == 1) {
-                    threat = true;
-                    break;
-                }
+            // Count consecutive in both directions from played cell
+            int forward = 0;
+            for (int i = 1; i < 5; ++i) {
+                int nx = x + i * dx;
+                int ny = y + i * dy;
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) break;
+                if (board[ny * width + nx] == player) forward++;
+                else break;
+            }
+            
+            int backward = 0;
+            for (int i = 1; i < 5; ++i) {
+                int nx = x - i * dx;
+                int ny = y - i * dy;
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) break;
+                if (board[ny * width + nx] == player) backward++;
+                else break;
+            }
+            
+            int total = forward + backward + 1;
+            
+            // If we have 4+ consecutive, it's a strong threat
+            if (total >= 4) {
+                threat = true;
+                break;
             }
         }
+        
         update_board(x, y, 0);
         return threat;
     };
@@ -495,18 +503,29 @@ Point GomokuAI::find_best_move(int time_limit) {
     int sy_t = std::max(0, min_y - margin);
     int ey_t = std::min(height - 1, max_y + margin);
 
+    // Priority 1: Immediate win for us
     for (int y = sy_t; y <= ey_t; ++y) {
         for (int x = sx_t; x <= ex_t; ++x) {
             int idx = y * width + x;
             if (board[idx] != 0) continue;
-
-            // 1) Immediate win for us.
             if (would_win(idx, 1)) return {x, y};
+        }
+    }
 
-            // 2) Immediate block: if opponent would win by playing here.
+    // Priority 2: Block opponent immediate win
+    for (int y = sy_t; y <= ey_t; ++y) {
+        for (int x = sx_t; x <= ex_t; ++x) {
+            int idx = y * width + x;
+            if (board[idx] != 0) continue;
             if (would_win(idx, 2)) return {x, y};
+        }
+    }
 
-            // 3) Block strong four threats (open or broken) the opponent would create here.
+    // Priority 3: Block strong four threats (open or broken)
+    for (int y = sy_t; y <= ey_t; ++y) {
+        for (int x = sx_t; x <= ex_t; ++x) {
+            int idx = y * width + x;
+            if (board[idx] != 0) continue;
             if (creates_four_threat(idx, 2)) return {x, y};
         }
     }

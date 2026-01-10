@@ -447,12 +447,46 @@ Point GomokuAI::find_best_move(int time_limit) {
         if (empty) return {width/2, height/2};
     }
 
-    // --- Tactical pre-pass: win-now or block-now ---
+    // --- Tactical pre-pass: win-now or block immediate threats (4 open/broken) ---
     auto would_win = [&](int idx, int player) {
         update_board(idx % width, idx / width, player);
         bool win = check_win(board, idx, width, height, player);
         update_board(idx % width, idx / width, 0);
         return win;
+    };
+
+    auto creates_four_threat = [&](int idx, int player) {
+        int x = idx % width;
+        int y = idx / width;
+        update_board(x, y, player);
+        bool threat = false;
+        for (int d = 0; d < 4 && !threat; ++d) {
+            int dx = (d == 0) ? 1 : (d == 1) ? 0 : (d == 2) ? 1 : -1;
+            int dy = (d == 0) ? 0 : (d == 1) ? 1 : 1;
+
+            // Sliding window of length 5 along the line crossing (x,y)
+            for (int offset = -4; offset <= 0 && !threat; ++offset) {
+                int stones = 0;
+                int empties = 0;
+                bool inside = true;
+                for (int k = 0; k < 5; ++k) {
+                    int nx = x + (offset + k) * dx;
+                    int ny = y + (offset + k) * dy;
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) { inside = false; break; }
+                    int cell = board[ny * width + nx];
+                    if (cell == player) stones++;
+                    else if (cell == 0) empties++;
+                }
+                if (!inside) continue;
+                // A window with 4 stones and 1 empty is a broken/closed/open four worth blocking.
+                if (stones == 4 && empties == 1) {
+                    threat = true;
+                    break;
+                }
+            }
+        }
+        update_board(x, y, 0);
+        return threat;
     };
 
     int margin = 2;
@@ -471,6 +505,9 @@ Point GomokuAI::find_best_move(int time_limit) {
 
             // 2) Immediate block: if opponent would win by playing here.
             if (would_win(idx, 2)) return {x, y};
+
+            // 3) Block strong four threats (open or broken) the opponent would create here.
+            if (creates_four_threat(idx, 2)) return {x, y};
         }
     }
 

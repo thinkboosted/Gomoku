@@ -184,7 +184,8 @@ static void test_turn_updates_opponent() {
     std::cout.rdbuf(old);
 
     // Verify opponent move was placed and our move was made
-    assert(protocol.get_ai().board[5][5] == 2 &&
+    int width = protocol.get_ai().width;
+    assert(protocol.get_ai().board[5 * width + 5] == 2 &&
            "Opponent move at (5,5) should be placed");
 }
 

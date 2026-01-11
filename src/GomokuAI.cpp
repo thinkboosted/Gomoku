@@ -153,10 +153,10 @@ bool check_win(const std::vector<int>& board, int idx, int w, int h, int player)
 
 int eval_state(const GomokuAI& ai, int player) {
     // Simplified Evaluation Function
-    const int W_LIVE_4 = 100000;
-    const int W_DEAD_4 = 2000;
-    const int W_LIVE_3 = 2000;
-    const int W_DEAD_3 = 100;
+    const int W_LIVE_4 = 1000000; // Win Guaranteed
+    const int W_DEAD_4 = 15000;   // Win next turn if not blocked (Check)
+    const int W_LIVE_3 = 8000;    // Create W_LIVE_4 next turn (Checkmate threat)
+    const int W_DEAD_3 = 500;
     const int W_LIVE_2 = 100;
 
     int total_score = 0;
@@ -189,9 +189,9 @@ int eval_state(const GomokuAI& ai, int player) {
         else if (count == 3) val = (open_head && open_tail) ? W_LIVE_3 : (open_head || open_tail ? W_DEAD_3 : 0);
         else if (count == 2 && open_head && open_tail) val = W_LIVE_2;
 
-        // Bias: Attacking is slightly more valuable than defending in the static evaluation
-        if (p == player) return static_cast<int>(val * 1.2); // 20% Attack bonus
-        return -val;
+        // Bias: Slight attack bias to maintain initiative, but rely on weights for safety
+        if (p == player) return static_cast<int>(val * 1.1); // 10% Attack bonus
+        return -val; // No massive defense bias anymore
     };
 
     for (int y = sy; y <= ey; ++y) {
@@ -258,11 +258,11 @@ int score_move(const GomokuAI& ai, int idx, int player, int ply) {
             opp_count++;
         }
 
-        // Weighting: Win > Block Win > Create 4 > Block 4
+        // Weighting: Win > Block Win > Block 4 > Create 4 > Create 3 > Block 3
         if (my_count >= 5) score += 100000000;      // WIN NOW
         else if (opp_count >= 5) score += 90000000; // BLOCK WIN (Must do)
+        else if (opp_count == 4) score += 2000000;  // Block 4 (Critical Defense)
         else if (my_count == 4) score += 1000000;   // Create 4 (Aggressive)
-        else if (opp_count == 4) score += 800000;    // Block 4
         else if (my_count == 3) score += 20000;     // Create 3
         else if (opp_count == 3) score += 15000;    // Block 3
     }
@@ -317,6 +317,31 @@ std::vector<std::pair<int, int>> get_sorted_moves(const GomokuAI& ai, int player
 
 // --- SEARCH ---
 
+bool check_threat(const std::vector<int>& board, int idx, int w, int h, int player) {
+    int x = idx % w;
+    int y = idx / w;
+    int dx[] = {1, 0, 1, -1};
+    int dy[] = {0, 1, 1, 1};
+
+    for (int d = 0; d < 4; ++d) {
+        int count = 1;
+        for (int i = 1; i < 5; ++i) {
+            int nx = x + i * dx[d];
+            int ny = y + i * dy[d];
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h || board[ny * w + nx] != player) break;
+            count++;
+        }
+        for (int i = 1; i < 5; ++i) {
+            int nx = x - i * dx[d];
+            int ny = y - i * dy[d];
+            if (nx < 0 || nx >= w || ny < 0 || ny >= h || board[ny * w + nx] != player) break;
+            count++;
+        }
+        if (count == 4) return true;
+    }
+    return false;
+}
+
 int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
     if (time_out_flag || check_time()) return TIMEOUT_SCORE;
 
@@ -356,7 +381,15 @@ int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
             break; 
         }
 
-        int val = -negamax(ai, depth - 1, -beta, -alpha, opponent, ply + 1);
+        // Search Extension: If move is forcing (creates a 4), do not reduce depth near leaves
+        int next_depth = depth - 1;
+        if (depth <= 2 && ply < 30) {
+            if (check_threat(ai.board, idx, ai.width, ai.height, player)) {
+                next_depth = depth; // Extend
+            }
+        }
+
+        int val = -negamax(ai, next_depth, -beta, -alpha, opponent, ply + 1);
         ai.update_board(idx % ai.width, idx / ai.width, 0);
 
         if (time_out_flag) return TIMEOUT_SCORE;
@@ -377,6 +410,7 @@ int negamax(GomokuAI& ai, int depth, int alpha, int beta, int player, int ply) {
             break; 
         }
     }
+
 
     if (!time_out_flag) {
         tte.key = key;
@@ -454,7 +488,7 @@ Point GomokuAI::find_best_move(int time_limit) {
     // Quick scan for immediate winning/blocking moves (Depth 1 equivalent)
     auto initial_moves = get_sorted_moves(*this, 1, 0);
     if (!initial_moves.empty()) {
-        best_move_global = {initial_moves[0].second % width, initial_moves[0].second / width};
+        best_move_global = Point{initial_moves[0].second % width, initial_moves[0].second / width};
     } else {
         // Should not happen unless board full
         for(int i=0; i<width*height; ++i) if(board[i]==0) return {i%width, i/width};
